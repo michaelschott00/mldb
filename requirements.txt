@@ -1,0 +1,14 @@
+scikit-learn
+tqdm
+pandas
+pandas-stubs
+numpy
+scipy
+basedpyright
+matplotlib
+lightning
+duckdb
+pandera
+--extra-index-url https://download.pytorch.org/whl/cpu
+torch
+torchvision
