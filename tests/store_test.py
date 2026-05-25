@@ -120,6 +120,14 @@ class ExperimentStoreTests(unittest.TestCase):
         np.testing.assert_equal(array, recovered_array_1)
         np.testing.assert_equal(array, recovered_array_2)
 
+    def test_add_tags_after_run_creation(self) -> None:
+        store = RunStore.from_env()
+        run_id = store.create_run("test_add_tags")
+        store.add_tags(run_id, ["tag1", "tag2"])
+        matched_run_ids = store.query_run(["tag1", "tag2"], [])
+        self.assertEqual(len(matched_run_ids), 1)
+        self.assertEqual(matched_run_ids[0], run_id)
+
     def test_store_and_query_tags(self) -> None:
         store = RunStore.from_env()
         _ = store.create_run("test_tags_1", ["tag1", "tag2", "tag3"])

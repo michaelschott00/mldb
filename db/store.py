@@ -357,11 +357,14 @@ class RunStore:
             [run_id, name, timestamp],
         )
         if tags is not None:
-            self._executemany_sql(
-                f"insert into {self._tags_table} values (?, ?)",
-                [(run_id, tag) for tag in tags],
-            )
+            self.add_tags(run_id, tags)
         return run_id
+
+    def add_tags(self, run_id: str, tags: list[str]) -> None:
+        self._executemany_sql(
+            f"insert into {self._tags_table} values (?, ?)",
+            [(run_id, tag) for tag in tags],
+        )
 
     def store(self, run_id: str, artifacts: dict[int | str, Any]) -> None:
         artifact_checksums: Sequence[tuple[str, str, str]] = list()
