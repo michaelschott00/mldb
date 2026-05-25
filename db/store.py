@@ -1,22 +1,22 @@
-from abc import ABC, abstractmethod
 import hashlib
 import io
 import os
 import re
 import shutil
+import sqlite3
 import warnings
+from abc import ABC, abstractmethod
+from collections.abc import Sequence
 from datetime import datetime
-import numpy as np
-from PIL import Image as PILImage
 from os import environ
 from pathlib import Path
 from typing import Any, Self
-from collections.abc import Sequence
 from zoneinfo import ZoneInfo
 
+import numpy as np
 import pandas as pd
 import torch
-import sqlite3
+from PIL import Image as PILImage
 
 from db.registry import Registry, TypeHandlerRegistry
 
@@ -29,6 +29,7 @@ def _require_env(name: str) -> str:
     if val is None:
         raise EnvironmentError(f"Required environment variable '{name}' is not set.")
     return val
+
 
 class StorableBlob(ABC):
     # TODO: replace Any with type parameter
@@ -161,7 +162,7 @@ class TableBlob(StorableBlob):
 
     @classmethod
     def to_bytes(cls, blob: pd.DataFrame | pd.Series) -> bytes:
-        return blob.to_csv(None).encode('utf-8')
+        return blob.to_csv(None).encode("utf-8")
 
     @classmethod
     def load_from_disk(cls, path: str, *args, **kwargs) -> pd.DataFrame:
@@ -257,34 +258,35 @@ class TorchStateDictBlob(StorableBlob):
         torch.save(blob, path)
 
 
-class ExperimentStore:
+# class RunLogger:
+#
+#     def __init__(self) -> None:
+#         pass
+#
+#     def register_run(self, name: str) -> str:
+#         timezone = ZoneInfo("Europe/Berlin")
+#         timestamp = datetime.now(timezone).strftime("%Y-%m-%d %H:%M:%S")
+#         run_id = f"run_{timestamp.replace(' ', '-')}_{name}"
+#         self._sql_execute(f"insert into {self._runs_table} values (?, ?, ?)", [run_id, name, timestamp])
+#         return run_id
 
+
+class RunStore:
     def __init__(
         self,
         root_dir: str,
         hash_depth: int = DEFAULT_HASH_DEPTH,
         hash_granularity: int = DEFAULT_HASH_GRANULARITY,
     ) -> None:
-        self._root_dir = Path(root_dir)
-        self._db_path: Path = self._root_dir / "index.db"
         self._hash_depth = hash_depth
         self._hash_granularity = hash_granularity
-        self._run_id = None
-        self._run_dir = None
+
+        self._root_dir = Path(root_dir)
         self._root_dir.mkdir(exist_ok=True, parents=True)
-        self._runs_table = "runs"
+        self._db_path: Path = self._root_dir / "index.db"
+
         self._artifacts_table = "artifacts"
-        self._tags_table = "tags"
-        self._run_sql(
-            f"""
-            create table if not exists {self._runs_table} (
-                run_id VARCHAR PRIMARY KEY,
-                run_name VARCHAR,
-                run_timestamp TIMESTAMP
-            )
-            """
-        )
-        self._run_sql(
+        self._execute_sql(
             f"""
             create table if not exists {self._artifacts_table} (
                 run_id VARCHAR,
@@ -294,114 +296,145 @@ class ExperimentStore:
             )
             """
         )
-        self._run_sql(
+        self._runs_table = "runs"
+        self._execute_sql(
+            f"""
+            create table if not exists {self._runs_table} (
+                run_id VARCHAR PRIMARY KEY,
+                run_name VARCHAR,
+                run_timestamp TIMESTAMP
+            )
+            """
+        )
+        self._tags_table = "tags"
+        self._execute_sql(
             f"""
             create table if not exists {self._tags_table} (
-                run_id VARCHAR PRIMARY KEY,
-                tag VARCHAR
+                run_id VARCHAR,
+                tag VARCHAR,
+                PRIMARY KEY (run_id, tag)
             )
             """
         )
 
     @classmethod
-    def from_env(
-        cls,
-        hash_depth: int = DEFAULT_HASH_DEPTH,
-        hash_granularity: int = DEFAULT_HASH_GRANULARITY,
-    ) -> Self:
+    def from_env(cls) -> Self:
         root_dir = _require_env("DATA_ROOT")
-        return cls(
-            root_dir=root_dir,
-            hash_depth=hash_depth,
-            hash_granularity=hash_granularity,
-        )
+        return cls(root_dir=root_dir)
 
-    @classmethod
-    def from_run(cls, run_id: str, root_dir: str | None = None) -> Self:
-        if root_dir is None:
-            root_dir = _require_env("DATA_ROOT")
-        # TODO: Detect hash depth and hash granularity
-        instance = cls(root_dir=root_dir)
-        instance._run_id = run_id
-        instance._run_dir = instance._root_dir / instance._run_id
-        return instance
-
-    def query(self, query: str, parameters: Sequence[Any] | None = None) -> pd.DataFrame:
-        data = self._run_sql(query, parameters)
+    def query(
+        self, query: str, parameters: Sequence[Any] | None = None
+    ) -> pd.DataFrame:
+        data = self._query_rows(query, parameters)
         df = pd.DataFrame(data)
         return df
-    
-    def query_one(self, query: str, parameters: Sequence[Any] | None = None) -> pd.Series:
-        df = self.query(query, parameters)
-        return df.iloc[0]
 
-    def query_value(self, query: str, parameters: Sequence[Any] | None = None) -> Any:
-        df = self.query(query, parameters)
-        return df.iloc[0, 0]
+    def _get_tag_query(self, include_tags: list[str], exclude_tags: list[str]) -> str:
+        query = ""
+        for i in range(len(include_tags) + len(exclude_tags)):
+            query += """
+                select run_id
+                from tags
+                where tag=?
+            """
+            if i < len(include_tags) - 1:
+                query += "intersect"
+            elif i < len(include_tags) + len(exclude_tags) - 1:
+                query += "except"
+        return query
 
-    def register_run(self, name: str) -> str:
+    def query_run(self, include_tags: list[str], exclude_tags: list[str]) -> list[str]:
+        query = self._get_tag_query(include_tags, exclude_tags)
+        matching_runs = self._query_rows(query, include_tags + exclude_tags)
+        return matching_runs["run_id"]
+
+    def create_run(self, name: str, tags: list[str] | None = None) -> str:
         timezone = ZoneInfo("Europe/Berlin")
         timestamp = datetime.now(timezone).strftime("%Y-%m-%d %H:%M:%S")
-        self._run_id = f"exp_{timestamp.replace(' ', '-')}_{name}"
-        self._run_dir = self._root_dir / self._run_id
-        self._run_dir.mkdir()
-        self._run_sql(f"insert into {self._runs_table} values (?, ?, ?)", [self._run_id, name, timestamp])
-        return self._run_id
+        run_id = f"run_{timestamp.replace(' ', '-')}_{name}"
+        self._execute_sql(
+            f"insert into {self._runs_table} values (?, ?, ?)",
+            [run_id, name, timestamp],
+        )
+        if tags is not None:
+            self._executemany_sql(
+                f"insert into {self._tags_table} values (?, ?)",
+                [(run_id, tag) for tag in tags],
+            )
+        return run_id
 
-    def store(
-        self,
-        artifacts: dict[int | str, Any]
-    ) -> None:
-        self._check_registered()
-        assert self._run_id is not None
+    def store(self, run_id: str, artifacts: dict[int | str, Any]) -> None:
         artifact_checksums: Sequence[tuple[str, str, str]] = list()
         for key, blob in artifacts.items():
             checksum = self._get_checksum(blob)
             uri = self._get_uri_for_checksum(checksum)
             self._save_to_disk(blob, uri)
-            artifact_checksums.append((self._run_id, str(key), checksum))
-        self._run_sql_many(f"insert into {self._artifacts_table} values (?, ?, ?)", artifact_checksums)
+            artifact_checksums.append((run_id, str(key), checksum))
+        self._executemany_sql(
+            f"insert into {self._artifacts_table} values (?, ?, ?)", artifact_checksums
+        )
 
     def load(self, run_id: str, artifact_name: str) -> Any:
-        checksum = self.query_value(
+        checksum = self._query_value(
             f"""
             select artifact_checksum
             from {self._artifacts_table}
             where run_id=? and artifact_name=?
             """,
-            parameters=[run_id, artifact_name]
+            parameters=[run_id, artifact_name],
         )
-        uri_no_ext = Path(self._get_uri_for_checksum(checksum))
-        uri_matches = list(uri_no_ext.parent.glob(f"{uri_no_ext.stem}*"))
-        if len(uri_matches) == 0:
-            raise ValueError(f"No match for artifact {artifact_name}")
-        if len(uri_matches) > 1:
-            raise ValueError(f"Multiple matches for artifact {artifact_name}")
-        blob = self._load_from_disk(str(uri_matches[0]))
+        blob = self._get_blob_for_checksum(checksum)
         return blob
 
-    def _check_registered(self) -> None:
-        if self._run_dir is None or self._run_id is None:
-            raise ValueError("Register run first")
+    def load_by_tag(
+        self, artifact_name: str, include_tags: list[str], exclude_tags: list[str]
+    ) -> dict[str, Any]:
+        tags_query = self._get_tag_query(include_tags, exclude_tags)
+        query = f"""
+            with matching_runs as ({tags_query})
+            select a.run_id, artifact_checksum
+            from matching_runs r
+            join {self._artifacts_table} a
+            on r.run_id=a.run_id
+            where a.artifact_name=?
+        """
+        query_result = self._query_rows(
+            query, include_tags + exclude_tags + [artifact_name]
+        )
+        result = dict()
+        for run_id, checksum in zip(
+            query_result["run_id"], query_result["artifact_checksum"]
+        ):
+            blob = self._get_blob_for_checksum(checksum)
+            result[run_id] = blob
+        return result
 
     def _get_checksum(self, blob: Any) -> str:
         return store_handlers.get_class(type(blob)).create_hash(blob)
-    
+
     def _get_blob_bucket(self, checksum: str) -> list[str]:
         n_digits = self._hash_granularity * 2  # two hexdigits = 1 byte
         blob_bucket = [
             checksum[i * n_digits : (i + 1) * n_digits] for i in range(self._hash_depth)
         ]
         return blob_bucket
-    
+
     def _get_uri_for_checksum(self, checksum: str) -> str:
-        self._check_registered()
-        assert self._run_dir is not None
         blob_bucket = self._get_blob_bucket(checksum)
-        blob_bucket_dir = self._run_dir / Path(*blob_bucket)
+        blob_bucket_dir = self._root_dir / Path(*blob_bucket)
         blob_bucket_dir.mkdir(exist_ok=True, parents=True)
         uri = blob_bucket_dir / checksum
         return str(uri)
+
+    def _get_blob_for_checksum(self, checksum: str) -> Any:
+        uri_no_ext = Path(self._get_uri_for_checksum(checksum))
+        uri_matches = list(uri_no_ext.parent.glob(f"{uri_no_ext.stem}*"))
+        if len(uri_matches) == 0:
+            raise ValueError(f"No match.")
+        if len(uri_matches) > 1:
+            raise ValueError(f"Multiple matches.")
+        blob = self._load_from_disk(str(uri_matches[0]))
+        return blob
 
     def _save_to_disk(self, blob: Any, uri: str) -> None:
         store_handlers.get_class(type(blob)).save_to_disk(blob, str(uri))
@@ -411,13 +444,65 @@ class ExperimentStore:
         blob = load_handlers.get_class(ext).load_from_disk(uri)
         return blob
 
-    def _run_sql(self, query: str, parameters: Sequence[Any] | None = None) -> list[Any]:
-        if parameters is None:
-            parameters = list()
+    def _execute_sql(self, query: str, parameters: Sequence[Any] | None = None) -> None:
         with sqlite3.connect(self._db_path) as con:
-            return con.execute(query, parameters).fetchall()
+            con.execute(query) if parameters is None else con.execute(query, parameters)
 
-    def _run_sql_many(self, query: str, parameters: Sequence[Any]) -> list[Any]:
+    def _executemany_sql(self, query: str, parameters: Sequence[Any]) -> None:
         with sqlite3.connect(self._db_path) as con:
-            return con.executemany(query, parameters).fetchall()
+            con.executemany(query, parameters)
 
+    def _query_result_to_dict(
+        self, column_names: list[str], rows: list[tuple[Any, ...]]
+    ) -> dict[str, list[Any]]:
+        result = dict()
+        for column_name, column_data in zip(column_names, zip(*rows)):
+            result[column_name] = column_data
+        return result
+
+    def _query_value(self, query: str, parameters: Sequence[Any] | None = None) -> Any:
+        with sqlite3.connect(self._db_path) as con:
+            cursor = (
+                con.execute(query)
+                if parameters is None
+                else con.execute(query, parameters)
+            )
+            rows = cursor.fetchall()
+        assert len(rows) == 1, rows
+        assert len(rows[0]) == 1, rows[0]
+        return rows[0][0]
+
+    def _query_column(
+        self, query: str, parameters: Sequence[Any] | None = None
+    ) -> list[Any]:
+        with sqlite3.connect(self._db_path) as con:
+            cursor = (
+                con.execute(query)
+                if parameters is None
+                else con.execute(query, parameters)
+            )
+            rows = cursor.fetchall()
+        assert len(rows[0]) == 1, rows[0]
+        return [row[0] for row in rows]
+
+    def _query_rows(
+        self, query: str, parameters: Sequence[Any] | None = None
+    ) -> dict[str, list[Any]]:
+        with sqlite3.connect(self._db_path) as con:
+            cursor = (
+                con.execute(query)
+                if parameters is None
+                else con.execute(query, parameters)
+            )
+            rows = cursor.fetchall()
+            column_names = [t[0] for t in cursor.description]
+        return self._query_result_to_dict(column_names, rows)
+
+    def _query_rows_many(
+        self, query: str, parameters: Sequence[Any]
+    ) -> dict[str, list[Any]]:
+        with sqlite3.connect(self._db_path) as con:
+            cursor = con.executemany(query, parameters)
+            rows = cursor.fetchall()
+            column_names = [t[0] for t in cursor.description]
+        return self._query_result_to_dict(column_names, rows)
