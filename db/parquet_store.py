@@ -257,7 +257,6 @@ class TorchStateDictBlob(StorableBlob):
         torch.save(blob, path)
 
 
-
 class ExperimentStore:
 
     def __init__(
@@ -273,9 +272,12 @@ class ExperimentStore:
         self._run_id = None
         self._run_dir = None
         self._root_dir.mkdir(exist_ok=True, parents=True)
+        self._runs_table = "runs"
+        self._artifacts_table = "artifacts"
+        self._tags_table = "tags"
         self._run_sql(
-            """
-            create table if not exists runs (
+            f"""
+            create table if not exists {self._runs_table} (
                 run_id VARCHAR PRIMARY KEY,
                 run_name VARCHAR,
                 run_timestamp TIMESTAMP
@@ -283,8 +285,8 @@ class ExperimentStore:
             """
         )
         self._run_sql(
-            """
-            create table if not exists artifacts (
+            f"""
+            create table if not exists {self._artifacts_table} (
                 run_id VARCHAR,
                 artifact_name VARCHAR,
                 artifact_checksum VARCHAR,
@@ -292,8 +294,14 @@ class ExperimentStore:
             )
             """
         )
-        self._runs_table = "runs"
-        self._artifacts_table = "artifacts"
+        self._run_sql(
+            f"""
+            create table if not exists {self._tags_table} (
+                run_id VARCHAR PRIMARY KEY,
+                tag VARCHAR
+            )
+            """
+        )
 
     @classmethod
     def from_env(
@@ -345,6 +353,7 @@ class ExperimentStore:
         artifacts: dict[int | str, Any]
     ) -> None:
         self._check_registered()
+        assert self._run_id is not None
         artifact_checksums: Sequence[tuple[str, str, str]] = list()
         for key, blob in artifacts.items():
             checksum = self._get_checksum(blob)
@@ -387,6 +396,7 @@ class ExperimentStore:
     
     def _get_uri_for_checksum(self, checksum: str) -> str:
         self._check_registered()
+        assert self._run_dir is not None
         blob_bucket = self._get_blob_bucket(checksum)
         blob_bucket_dir = self._run_dir / Path(*blob_bucket)
         blob_bucket_dir.mkdir(exist_ok=True, parents=True)
