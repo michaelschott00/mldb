@@ -4,6 +4,7 @@ import os
 import re
 import shutil
 import sqlite3
+import uuid
 import warnings
 from abc import ABC, abstractmethod
 from collections.abc import Sequence
@@ -351,7 +352,7 @@ class RunStore:
     def create_run(self, name: str, tags: list[str] | None = None) -> str:
         timezone = ZoneInfo("Europe/Berlin")
         timestamp = datetime.now(timezone).strftime("%Y-%m-%d %H:%M:%S")
-        run_id = f"run_{timestamp.replace(' ', '-')}_{name}"
+        run_id = f"run_{timestamp.replace(' ', '-')}_{uuid.uuid4().hex[:8]}_{name}"
         self._execute_sql(
             f"insert into {self._runs_table} values (?, ?, ?)",
             [run_id, name, timestamp],
@@ -389,7 +390,7 @@ class RunStore:
         blob = self._get_blob_for_checksum(checksum)
         return blob
 
-    def load_by_tag(
+    def load_by_tags(
         self, artifact_name: str, include_tags: list[str], exclude_tags: list[str]
     ) -> dict[str, Any]:
         tags_query = self._get_tag_query(include_tags, exclude_tags)

@@ -1,4 +1,5 @@
 import json
+import multiprocessing
 import os
 import shutil
 import unittest
@@ -31,6 +32,13 @@ class Environment:
 
 
 Environment.set_variables()
+
+
+def _concurrent_worker(root_dir: str, data: list, result_queue: multiprocessing.Queue) -> None:
+    store = RunStore(root_dir)
+    run_id = store.create_run("concurrent_run")
+    store.store(run_id, {"array": np.array(data)})
+    result_queue.put((run_id, data))
 
 
 class ExperimentStoreTests(unittest.TestCase):
@@ -137,7 +145,7 @@ class ExperimentStoreTests(unittest.TestCase):
         self.assertEqual(len(matched_run_ids), 1)
         self.assertEqual(run_id_2, matched_run_ids[0])
 
-    def test_load_by_tag(self) -> None:
+    def test_load_by_tags(self) -> None:
         store = RunStore.from_env()
         df_1 = pd.DataFrame({"x": [1, 2], "y": [3, 4]})
         df_2 = pd.DataFrame({"x": [5, 6], "y": [7, 8]})
@@ -152,8 +160,30 @@ class ExperimentStoreTests(unittest.TestCase):
         store.store(run_id_3, {"df": df_3})
 
         # include tag2+tag3, exclude tag1 → only run2 matches
-        results = store.load_by_tag("df", ["tag2", "tag3"], ["tag1"])
+        results = store.load_by_tags("df", ["tag2", "tag3"], ["tag1"])
 
         self.assertEqual(len(results), 1)
         self.assertTrue(run_id_2 in results)
         pd.testing.assert_frame_equal(results[run_id_2], df_2)
+
+    def test_concurrent_run_creation(self) -> None:
+        root_dir = str(Environment.DATA_ROOT)
+        result_queue: multiprocessing.Queue = multiprocessing.Queue()
+        processes = [
+            multiprocessing.Process(
+                target=_concurrent_worker, args=(root_dir, [1, 2, 3], result_queue)
+            ),
+            multiprocessing.Process(
+                target=_concurrent_worker, args=(root_dir, [4, 5, 6], result_queue)
+            ),
+        ]
+        for p in processes:
+            p.start()
+        for p in processes:
+            p.join()
+            self.assertEqual(p.exitcode, 0)
+
+        store = RunStore(root_dir)
+        for _ in processes:
+            run_id, data = result_queue.get()
+            np.testing.assert_equal(store.load(run_id, "array"), np.array(data))
