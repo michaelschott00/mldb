@@ -192,7 +192,7 @@ class ExperimentStoreTests(unittest.TestCase):
 
     def _prepare_workflow_test_data(
         self,
-    ) -> tuple[list[str], str, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    ) -> tuple[list[str], str, pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
         img_ids = [1, 2, 3, 4]
         df_an_1 = pd.DataFrame(
             {
@@ -253,10 +253,14 @@ class ExperimentStoreTests(unittest.TestCase):
         exp_run_id = store.create_run("tryout_param_x", ["my_tuning_run"])
         store.store(exp_run_id, {"measurements": df_m})
 
-        return ds_run_ids, exp_run_id, df_an_1, df_an_2, df_m
+        df = df_an_1.merge(df_m, on="img_id")
+
+        return ds_run_ids, exp_run_id, df_an_1, df_an_2, df_m, df
 
     def test_dataset_pandas_workflow(self) -> None:
-        ds_run_ids, exp_run_id, df_an_1, _, df_m = self._prepare_workflow_test_data()
+        ds_run_ids, exp_run_id, df_an_1, _, df_m, df = (
+            self._prepare_workflow_test_data()
+        )
 
         # Analyze results together with dataset metadata
         store = RunStore.from_env()
@@ -265,16 +269,21 @@ class ExperimentStoreTests(unittest.TestCase):
         ]
         df_m_rec = store.load_by_tags("measurements", ["my_tuning_run"], [])[exp_run_id]
         df_rec = df_an_rec.merge(df_m_rec, on="img_id")
-        df = df_an_1.merge(df_m, on="img_id")
         pd.testing.assert_frame_equal(df_rec, df)
 
-    # def test_dataset_duckdb_workflow(self) -> None:
-    #     ds_run_ids, exp_run_id, df_an_1, _, df_m = self._prepare_workflow_test_data()
+    def test_dataset_duckdb_workflow(self) -> None:
+        _, _, _, _, _, df = self._prepare_workflow_test_data()
 
-    #     # Analyze results together with dataset metadata
-    #     store = RunStore.from_env()
-    #     con = store.load_duckdb()
-    #     pd.testing.assert_frame_equal(df_rec, df)
+        # Analyze results together with dataset metadata
+        store = RunStore.from_env()
+        with store.load_duckdb(
+            ("attribute_names", ("dataset_1",), ()),
+            ("measurements", ("my_tuning_run",), ()),
+        ) as con:
+            df_rec = con.sql(
+                "select * exclude m.img_id from attribute_names n join measurements m on n.img_id=m.img_id"
+            ).df()
+        pd.testing.assert_frame_equal(df_rec, df)
 
 
 if __name__ == "__main__":

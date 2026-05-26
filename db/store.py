@@ -7,7 +7,8 @@ import sqlite3
 import uuid
 import warnings
 from abc import ABC, abstractmethod
-from collections.abc import Sequence
+from collections.abc import Generator, Sequence
+from contextlib import contextmanager
 from datetime import datetime
 from os import environ
 from pathlib import Path
@@ -390,22 +391,34 @@ class RunStore:
             result[run_id] = blob
         return result
 
+    @contextmanager
     def load_duckdb(
-        self,
-        artifact_names: list[str],
-        include_tags: list[str],
-        exclude_tags: list[str],
-    ) -> duckdb.DuckDBPyConnection:
-        query_result = self._do_tag_search(artifact_name, include_tags, exclude_tags)
+        self, *args: tuple[str, tuple[str, ...], tuple[str, ...]]
+    ) -> Generator[duckdb.DuckDBPyConnection]:
+        tag_matches = dict()
+        for artifact_name, include_tags, exclude_tags in args:
+            tag_match = self._do_tag_search(
+                artifact_name, list(include_tags), list(exclude_tags)
+            )
+            for k, v in tag_match.items():
+                if k not in tag_matches:
+                    tag_matches[k] = list()
+                tag_matches[k].extend(v)
+        tag_matches_df = pd.DataFrame(tag_matches)
         con = duckdb.connect()
-        for run_id, checksum in zip(
-            query_result["run_id"], query_result["artifact_checksum"]
-        ):
-            uri = self._get_uri_for_checksum(checksum, resolve_ext=True)
-            assert uri.endswith(".csv")
-            # TODO: Dangerous string replacement
-            con.sql(f"create table {artifact_name} as from '{uri}'")
-        return con
+        try:
+            for run_id, name, checksum in zip(
+                tag_matches_df["run_id"],
+                tag_matches_df["artifact_name"],
+                tag_matches_df["artifact_checksum"],
+            ):
+                uri = self._get_uri_for_checksum(checksum, resolve_ext=True)
+                assert uri.endswith(".csv")
+                # TODO: Dangerous string replacement
+                con.sql(f"create table {name} as from '{uri}'")
+            yield con
+        finally:
+            con.close()
 
     def _get_tag_query(self, include_tags: list[str], exclude_tags: list[str]) -> str:
         query = ""
@@ -422,20 +435,27 @@ class RunStore:
         return query
 
     def _do_tag_search(
-        self, artifact_name: str, include_tags: list[str], exclude_tags: list[str]
+        self,
+        artifact_name: str | list[str],
+        include_tags: list[str],
+        exclude_tags: list[str],
     ) -> dict[str, Any]:
         tags_query = self._get_tag_query(include_tags, exclude_tags)
+        artifact_names = (
+            [artifact_name] if isinstance(artifact_name, str) else artifact_name
+        )
+        placeholders = ", ".join("?" * len(artifact_names))
         # TODO: Use that selection join (semi-join?)
         query = f"""
             with matching_runs as ({tags_query})
-            select a.run_id, artifact_checksum
+            select a.run_id, artifact_name, artifact_checksum
             from matching_runs r
             join {self._artifacts_table} a
             on r.run_id=a.run_id
-            where a.artifact_name=?
+            where a.artifact_name IN ({placeholders})
         """
         query_result = self._query_rows(
-            query, include_tags + exclude_tags + [artifact_name]
+            query, include_tags + exclude_tags + artifact_names
         )
         return query_result
 
