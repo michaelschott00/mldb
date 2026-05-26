@@ -1,0 +1,39 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "mldb"
+version = "0.0.1"
+dependencies = [
+  "duckdb==1.5.3",
+  "numpy==2.4.6",
+  "pandas==3.0.3",
+  "Pillow==12.2.0",
+  "torch==2.11.0",
+  "click==8.4.1",
+  "sqlalchemy==2.0.50"
+]
+authors = [
+{ name="Michael Schott", email="michael.m.develop@protonmail.com" },
+]
+description = "A database management tool for machine learning experiments"
+readme = "README.md"
+requires-python = ">=3.9"
+classifiers = [
+  "Programming Language :: Python :: 3",
+  "Operating System :: OS Independent",
+]
+license = "MIT"
+license-files = ["LICEN[CS]E*"]
+
+[project.scripts]
+mldb = "mldb.cli:main"
+
+[project.optional-dependencies]
+dev = ["ruff", "basedpyright", "pandas-stubs"]
+docs = ["sphinx", "sphinx-rtd-theme"]
+
+[project.urls]
+Homepage = "https://github.com/pypa/sampleproject"
+Issues = "https://github.com/pypa/sampleproject/issues"

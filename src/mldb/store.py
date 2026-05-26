@@ -21,7 +21,7 @@ import pandas as pd
 import torch
 from PIL import Image as PILImage
 
-from db.registry import Registry, TypeHandlerRegistry
+from mldb.registry import Registry, TypeHandlerRegistry
 
 DEFAULT_HASH_DEPTH = 3
 DEFAULT_HASH_GRANULARITY = 1
@@ -325,16 +325,9 @@ class RunStore:
         root_dir = _require_env("DATA_ROOT")
         return cls(root_dir=root_dir)
 
-    def query(
-        self, query: str, parameters: Sequence[Any] | None = None
-    ) -> pd.DataFrame:
-        data = self._query_rows(query, parameters)
-        df = pd.DataFrame(data)
-        return df
-
-    def query_run(self, include_tags: list[str], exclude_tags: list[str]) -> list[str]:
-        query = self._get_tag_query(include_tags, exclude_tags)
-        matching_runs = self._query_rows(query, include_tags + exclude_tags)
+    def list_runs(self, include_tags: list[str], exclude_tags: list[str]) -> list[str]:
+        tag_query = self._get_tag_query(include_tags, exclude_tags)
+        matching_runs = self._query_rows(tag_query, include_tags + exclude_tags)
         return matching_runs["run_id"]
 
     def create_run(self, name: str, tags: list[str] | None = None) -> str:
@@ -354,6 +347,32 @@ class RunStore:
             f"insert into {self._tags_table} values (?, ?)",
             [(run_id, tag) for tag in tags],
         )
+
+    def delete_run(self, run_id: str) -> None:
+        result = self._query_rows(
+            f"""
+            select artifact_checksum
+            from {self._artifacts_table}
+            where run_id = ?
+            and artifact_checksum not in (
+                select artifact_checksum
+                from {self._artifacts_table}
+                where run_id != ?
+            )
+            """,
+            [run_id, run_id],
+        )
+        orphaned_checksums = list(result.get("artifact_checksum", []))
+        self._execute_sql_batch(
+            [
+                (f"delete from {self._runs_table} where run_id = ?", [run_id]),
+                (f"delete from {self._tags_table} where run_id = ?", [run_id]),
+                (f"delete from {self._artifacts_table} where run_id = ?", [run_id]),
+            ]
+        )
+        for checksum in orphaned_checksums:
+            uri = self._get_uri_for_checksum(checksum, resolve_ext=True)
+            os.remove(uri)
 
     def store(self, run_id: str, artifacts: dict[int | str, Any]) -> None:
         artifact_checksums: Sequence[tuple[str, str, str]] = list()
@@ -477,9 +496,9 @@ class RunStore:
         if resolve_ext:
             uri_matches = list(blob_bucket_dir.glob(checksum + "*"))
             if len(uri_matches) == 0:
-                raise ValueError(f"No match.")
+                raise ValueError("No match.")
             if len(uri_matches) > 1:
-                raise ValueError(f"Multiple matches.")
+                raise ValueError("Multiple matches.")
             return str(uri_matches[0])
         return str(uri_no_ext)
 
@@ -503,6 +522,13 @@ class RunStore:
     def _executemany_sql(self, query: str, parameters: Sequence[Any]) -> None:
         with sqlite3.connect(self._db_path) as con:
             con.executemany(query, parameters)
+
+    def _execute_sql_batch(
+        self, queries_and_params: list[tuple[str, Sequence[Any] | None]]
+    ) -> None:
+        with sqlite3.connect(self._db_path) as con:
+            for query, params in queries_and_params:
+                con.execute(query) if params is None else con.execute(query, params)
 
     def _query_result_to_dict(
         self, column_names: list[str], rows: list[tuple[Any, ...]]

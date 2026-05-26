@@ -13,7 +13,7 @@ import pandas as pd
 import torch
 
 # from PIL import Image
-from db.store import RunStore
+from mldb.store import RunStore
 
 
 @dataclass
@@ -134,7 +134,7 @@ class ExperimentStoreTests(unittest.TestCase):
         store = RunStore.from_env()
         run_id = store.create_run("test_add_tags")
         store.add_tags(run_id, ["tag1", "tag2"])
-        matched_run_ids = store.query_run(["tag1", "tag2"], [])
+        matched_run_ids = store.list_runs(["tag1", "tag2"], [])
         self.assertEqual(len(matched_run_ids), 1)
         self.assertEqual(matched_run_ids[0], run_id)
 
@@ -143,7 +143,7 @@ class ExperimentStoreTests(unittest.TestCase):
         _ = store.create_run("test_tags_1", ["tag1", "tag2", "tag3"])
         run_id_2 = store.create_run("test_tags_2", ["tag2", "tag3", "tag4"])
         _ = store.create_run("test_tags_3", ["tag3", "tag4"])
-        matched_run_ids = store.query_run(["tag2", "tag3"], ["tag1"])
+        matched_run_ids = store.list_runs(["tag2", "tag3"], ["tag1"])
         self.assertEqual(len(matched_run_ids), 1)
         self.assertEqual(run_id_2, matched_run_ids[0])
 
@@ -167,6 +167,30 @@ class ExperimentStoreTests(unittest.TestCase):
         self.assertEqual(len(results), 1)
         self.assertTrue(run_id_2 in results)
         pd.testing.assert_frame_equal(results[run_id_2], df_2)
+
+    def test_delete_run(self) -> None:
+        store = RunStore.from_env()
+        run_id = store.create_run("to_delete", ["delete_tag"])
+        array = np.array([1, 2, 3])
+        store.store(run_id, {"array": array})
+
+        store.delete_run(run_id)
+
+        self.assertEqual(len(store.list_runs(["delete_tag"], [])), 0)
+        with self.assertRaises(AssertionError):
+            store.load(run_id, "array")
+
+    def test_delete_run_preserves_shared_artifact(self) -> None:
+        store = RunStore.from_env()
+        array = np.array([1, 2, 3])
+        run_id_1 = store.create_run("run1")
+        run_id_2 = store.create_run("run2")
+        store.store(run_id_1, {"array": array})
+        store.store(run_id_2, {"array": array})
+
+        store.delete_run(run_id_1)
+
+        np.testing.assert_equal(store.load(run_id_2, "array"), array)
 
     def test_concurrent_run_creation(self) -> None:
         root_dir = str(Environment.DATA_ROOT)
@@ -258,9 +282,7 @@ class ExperimentStoreTests(unittest.TestCase):
         return ds_run_ids, exp_run_id, df_an_1, df_an_2, df_m, df
 
     def test_dataset_pandas_workflow(self) -> None:
-        ds_run_ids, exp_run_id, df_an_1, _, df_m, df = (
-            self._prepare_workflow_test_data()
-        )
+        ds_run_ids, exp_run_id, _, _, _, df = self._prepare_workflow_test_data()
 
         # Analyze results together with dataset metadata
         store = RunStore.from_env()

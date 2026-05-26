@@ -1,14 +1,5 @@
-scikit-learn
-tqdm
-pandas
-pandas-stubs
-numpy
-scipy
-basedpyright
-matplotlib
-lightning
-duckdb
-pandera
---extra-index-url https://download.pytorch.org/whl/cpu
-torch
-torchvision
+duckdb==1.5.3
+numpy==2.4.6
+pandas==3.0.3
+Pillow==12.2.0
+torch==2.11.0+cpu
