@@ -327,8 +327,8 @@ class RunStore:
 
     def list_runs(self, include_tags: list[str], exclude_tags: list[str]) -> list[str]:
         tag_query = self._get_tag_query(include_tags, exclude_tags)
-        matching_runs = self._query_rows(tag_query, include_tags + exclude_tags)
-        return matching_runs["run_id"]
+        matching_runs = self._query_column(tag_query, include_tags + exclude_tags)
+        return matching_runs
 
     def create_run(self, name: str, tags: list[str] | None = None) -> str:
         timezone = ZoneInfo("Europe/Berlin")
@@ -560,7 +560,7 @@ class RunStore:
                 else con.execute(query, parameters)
             )
             rows = cursor.fetchall()
-        assert len(rows[0]) == 1, rows[0]
+        assert len(rows) == 0 or len(rows[0]) == 1, rows[0]
         return [row[0] for row in rows]
 
     def _query_rows(
