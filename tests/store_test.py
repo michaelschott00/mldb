@@ -34,7 +34,9 @@ class Environment:
 Environment.set_variables()
 
 
-def _concurrent_worker(root_dir: str, data: list, result_queue: multiprocessing.Queue) -> None:
+def _concurrent_worker(
+    root_dir: str, data: list, result_queue: multiprocessing.Queue
+) -> None:
     store = RunStore(root_dir)
     run_id = store.create_run("concurrent_run")
     store.store(run_id, {"array": np.array(data)})
@@ -187,3 +189,93 @@ class ExperimentStoreTests(unittest.TestCase):
         for _ in processes:
             run_id, data = result_queue.get()
             np.testing.assert_equal(store.load(run_id, "array"), np.array(data))
+
+    def _prepare_workflow_test_data(
+        self,
+    ) -> tuple[list[str], str, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+        img_ids = [1, 2, 3, 4]
+        df_an_1 = pd.DataFrame(
+            {
+                "img_id": img_ids * 3,
+                "attribute_id": [1] * 4 + [2] * 4 + [3] * 4,
+                "is_present": [
+                    True,
+                    False,
+                    True,
+                    True,
+                    False,
+                    False,
+                    True,
+                    True,
+                    True,
+                    True,
+                    True,
+                    False,
+                ],
+            }
+        )
+        df_an_2 = pd.DataFrame(
+            {
+                "img_id": img_ids * 3,
+                "attribute_id": [1] * 4 + [2] * 4 + [3] * 4,
+                "is_present": [
+                    False,
+                    True,
+                    True,
+                    True,
+                    False,
+                    False,
+                    False,
+                    True,
+                    True,
+                    True,
+                    True,
+                    False,
+                ],
+            }
+        )
+        df_m = pd.DataFrame(
+            {"img_id": img_ids, "measurement": [i / 10 for i in range(len(img_ids))]}
+        )
+
+        # Initialize multiple datasets
+        ds_run_ids = list()
+        for i, df_an in enumerate([df_an_1, df_an_2]):
+            store = RunStore.from_env()
+            ds_run_id = store.create_run(
+                f"initialize_dataset_{i + 1}", [f"dataset_{i + 1}"]
+            )
+            ds_run_ids.append(ds_run_id)
+            store.store(ds_run_id, {"attribute_names": df_an})
+
+        # Run experiment on dataset 1
+        store = RunStore.from_env()
+        exp_run_id = store.create_run("tryout_param_x", ["my_tuning_run"])
+        store.store(exp_run_id, {"measurements": df_m})
+
+        return ds_run_ids, exp_run_id, df_an_1, df_an_2, df_m
+
+    def test_dataset_pandas_workflow(self) -> None:
+        ds_run_ids, exp_run_id, df_an_1, _, df_m = self._prepare_workflow_test_data()
+
+        # Analyze results together with dataset metadata
+        store = RunStore.from_env()
+        df_an_rec = store.load_by_tags("attribute_names", ["dataset_1"], [])[
+            ds_run_ids[0]
+        ]
+        df_m_rec = store.load_by_tags("measurements", ["my_tuning_run"], [])[exp_run_id]
+        df_rec = df_an_rec.merge(df_m_rec, on="img_id")
+        df = df_an_1.merge(df_m, on="img_id")
+        pd.testing.assert_frame_equal(df_rec, df)
+
+    # def test_dataset_duckdb_workflow(self) -> None:
+    #     ds_run_ids, exp_run_id, df_an_1, _, df_m = self._prepare_workflow_test_data()
+
+    #     # Analyze results together with dataset metadata
+    #     store = RunStore.from_env()
+    #     con = store.load_duckdb()
+    #     pd.testing.assert_frame_equal(df_rec, df)
+
+
+if __name__ == "__main__":
+    unittest.main()

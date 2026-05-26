@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Any, Self
 from zoneinfo import ZoneInfo
 
+import duckdb
 import numpy as np
 import pandas as pd
 import torch
@@ -330,20 +331,6 @@ class RunStore:
         df = pd.DataFrame(data)
         return df
 
-    def _get_tag_query(self, include_tags: list[str], exclude_tags: list[str]) -> str:
-        query = ""
-        for i in range(len(include_tags) + len(exclude_tags)):
-            query += """
-                select run_id
-                from tags
-                where tag=?
-            """
-            if i < len(include_tags) - 1:
-                query += "intersect"
-            elif i < len(include_tags) + len(exclude_tags) - 1:
-                query += "except"
-        return query
-
     def query_run(self, include_tags: list[str], exclude_tags: list[str]) -> list[str]:
         query = self._get_tag_query(include_tags, exclude_tags)
         matching_runs = self._query_rows(query, include_tags + exclude_tags)
@@ -393,7 +380,52 @@ class RunStore:
     def load_by_tags(
         self, artifact_name: str, include_tags: list[str], exclude_tags: list[str]
     ) -> dict[str, Any]:
+        query_result = self._do_tag_search(artifact_name, include_tags, exclude_tags)
+        result = dict()
+        for run_id, checksum in zip(
+            query_result["run_id"], query_result["artifact_checksum"]
+        ):
+            assert run_id not in result, result
+            blob = self._get_blob_for_checksum(checksum)
+            result[run_id] = blob
+        return result
+
+    def load_duckdb(
+        self,
+        artifact_names: list[str],
+        include_tags: list[str],
+        exclude_tags: list[str],
+    ) -> duckdb.DuckDBPyConnection:
+        query_result = self._do_tag_search(artifact_name, include_tags, exclude_tags)
+        con = duckdb.connect()
+        for run_id, checksum in zip(
+            query_result["run_id"], query_result["artifact_checksum"]
+        ):
+            uri = self._get_uri_for_checksum(checksum, resolve_ext=True)
+            assert uri.endswith(".csv")
+            # TODO: Dangerous string replacement
+            con.sql(f"create table {artifact_name} as from '{uri}'")
+        return con
+
+    def _get_tag_query(self, include_tags: list[str], exclude_tags: list[str]) -> str:
+        query = ""
+        for i in range(len(include_tags) + len(exclude_tags)):
+            query += """
+                select run_id
+                from tags
+                where tag=?
+            """
+            if i < len(include_tags) - 1:
+                query += "intersect"
+            elif i < len(include_tags) + len(exclude_tags) - 1:
+                query += "except"
+        return query
+
+    def _do_tag_search(
+        self, artifact_name: str, include_tags: list[str], exclude_tags: list[str]
+    ) -> dict[str, Any]:
         tags_query = self._get_tag_query(include_tags, exclude_tags)
+        # TODO: Use that selection join (semi-join?)
         query = f"""
             with matching_runs as ({tags_query})
             select a.run_id, artifact_checksum
@@ -405,13 +437,7 @@ class RunStore:
         query_result = self._query_rows(
             query, include_tags + exclude_tags + [artifact_name]
         )
-        result = dict()
-        for run_id, checksum in zip(
-            query_result["run_id"], query_result["artifact_checksum"]
-        ):
-            blob = self._get_blob_for_checksum(checksum)
-            result[run_id] = blob
-        return result
+        return query_result
 
     def _get_checksum(self, blob: Any) -> str:
         return store_handlers.get_class(type(blob)).create_hash(blob)
@@ -423,21 +449,23 @@ class RunStore:
         ]
         return blob_bucket
 
-    def _get_uri_for_checksum(self, checksum: str) -> str:
+    def _get_uri_for_checksum(self, checksum: str, resolve_ext: bool = False) -> str:
         blob_bucket = self._get_blob_bucket(checksum)
         blob_bucket_dir = self._root_dir / Path(*blob_bucket)
         blob_bucket_dir.mkdir(exist_ok=True, parents=True)
-        uri = blob_bucket_dir / checksum
-        return str(uri)
+        uri_no_ext = blob_bucket_dir / checksum
+        if resolve_ext:
+            uri_matches = list(blob_bucket_dir.glob(checksum + "*"))
+            if len(uri_matches) == 0:
+                raise ValueError(f"No match.")
+            if len(uri_matches) > 1:
+                raise ValueError(f"Multiple matches.")
+            return str(uri_matches[0])
+        return str(uri_no_ext)
 
     def _get_blob_for_checksum(self, checksum: str) -> Any:
-        uri_no_ext = Path(self._get_uri_for_checksum(checksum))
-        uri_matches = list(uri_no_ext.parent.glob(f"{uri_no_ext.stem}*"))
-        if len(uri_matches) == 0:
-            raise ValueError(f"No match.")
-        if len(uri_matches) > 1:
-            raise ValueError(f"Multiple matches.")
-        blob = self._load_from_disk(str(uri_matches[0]))
+        uri = self._get_uri_for_checksum(checksum, resolve_ext=True)
+        blob = self._load_from_disk(uri)
         return blob
 
     def _save_to_disk(self, blob: Any, uri: str) -> None:
