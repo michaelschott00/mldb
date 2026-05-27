@@ -273,7 +273,7 @@ class TorchStateDictBlob(StorableBlob):
         torch.save(blob, path)
 
 
-class RunStore:
+class BlobStore:
     def __init__(
         self,
         root_dir: str,
@@ -282,11 +282,55 @@ class RunStore:
     ) -> None:
         self._hash_depth = hash_depth
         self._hash_granularity = hash_granularity
-
         self._root_dir = Path(root_dir)
         self._root_dir.mkdir(exist_ok=True, parents=True)
-        db_path = self._root_dir / "index.db"
 
+    def store(self, blob: Any) -> str:
+        checksum = self._checksum(blob)
+        store_handlers.get_class(type(blob)).save_to_disk(blob, self._uri(checksum))
+        return checksum
+
+    def load(self, checksum: str) -> Any:
+        uri = self._uri(checksum, resolve_ext=True)
+        _, ext = os.path.splitext(os.path.basename(uri))
+        return load_handlers.get_class(ext).load_from_disk(uri)
+
+    def uri(self, checksum: str, resolve_ext: bool = False) -> str:
+        return self._uri(checksum, resolve_ext)
+
+    def delete(self, checksum: str) -> None:
+        os.remove(self._uri(checksum, resolve_ext=True))
+
+    def _checksum(self, blob: Any) -> str:
+        return store_handlers.get_class(type(blob)).create_hash(blob)
+
+    def _uri(self, checksum: str, resolve_ext: bool = False) -> str:
+        n_digits = self._hash_granularity * 2
+        bucket = [
+            checksum[i * n_digits : (i + 1) * n_digits] for i in range(self._hash_depth)
+        ]
+        bucket_dir = self._root_dir / Path(*bucket)
+        bucket_dir.mkdir(exist_ok=True, parents=True)
+        if resolve_ext:
+            matches = list(bucket_dir.glob(checksum + "*"))
+            if len(matches) == 0:
+                raise ValueError("No match.")
+            if len(matches) > 1:
+                raise ValueError("Multiple matches.")
+            return str(matches[0])
+        return str(bucket_dir / checksum)
+
+
+class RunStore:
+    def __init__(
+        self,
+        root_dir: str,
+        hash_depth: int = DEFAULT_HASH_DEPTH,
+        hash_granularity: int = DEFAULT_HASH_GRANULARITY,
+    ) -> None:
+        self._blob_store = BlobStore(root_dir, hash_depth, hash_granularity)
+
+        db_path = Path(root_dir) / "index.db"
         self._engine: Engine = create_engine(f"sqlite:///{db_path}")
         _meta = MetaData()
         self._artifacts = Table(
@@ -313,6 +357,12 @@ class RunStore:
             for table in [self._artifacts, self._runs, self._tags]:
                 conn.execute(CreateTable(table, if_not_exists=True))
             conn.commit()
+
+    def close(self) -> None:
+        self._engine.dispose()
+
+    def __del__(self) -> None:
+        self.close()
 
     @classmethod
     def from_env(cls) -> Self:
@@ -357,7 +407,7 @@ class RunStore:
             ),
         )
         with self._engine.connect() as conn:
-            orphaned_checksums = conn.execute(orphaned_stmt).scalars()
+            orphaned_checksums = list(conn.execute(orphaned_stmt).scalars())
         with self._engine.connect() as conn:
             conn.execute(delete(self._runs).where(self._runs.c.run_id == run_id))
             conn.execute(delete(self._tags).where(self._tags.c.run_id == run_id))
@@ -366,15 +416,12 @@ class RunStore:
             )
             conn.commit()
         for checksum in orphaned_checksums:
-            uri = self._get_uri_for_checksum(checksum, resolve_ext=True)
-            os.remove(uri)
+            self._blob_store.delete(checksum)
 
     def store(self, run_id: str, artifacts: dict[int | str, Any]) -> None:
         artifact_rows = []
         for key, blob in artifacts.items():
-            checksum = self._get_checksum(blob)
-            uri = self._get_uri_for_checksum(checksum)
-            self._save_to_disk(blob, uri)
+            checksum = self._blob_store.store(blob)
             artifact_rows.append(
                 {
                     "run_id": run_id,
@@ -395,7 +442,7 @@ class RunStore:
             checksum = conn.execute(stmt).scalar_one_or_none()
         if checksum is None:
             raise ValueError(f"Artifact {artifact_name} not found for {run_id}")
-        return self._get_blob_for_checksum(checksum)
+        return self._blob_store.load(checksum)
 
     def load_by_tags(
         self, artifact_name: str, include_tags: list[str], exclude_tags: list[str]
@@ -403,7 +450,7 @@ class RunStore:
         result = dict()
         for row in self._do_tag_search(artifact_name, include_tags, exclude_tags):
             assert row.run_id not in result, result
-            result[row.run_id] = self._get_blob_for_checksum(row.artifact_checksum)
+            result[row.run_id] = self._blob_store.load(row.artifact_checksum)
         return result
 
     @contextmanager
@@ -416,9 +463,7 @@ class RunStore:
                 for row in self._do_tag_search(
                     artifact_name, list(include_tags), list(exclude_tags)
                 ):
-                    uri = self._get_uri_for_checksum(
-                        row.artifact_checksum, resolve_ext=True
-                    )
+                    uri = self._blob_store.uri(row.artifact_checksum, resolve_ext=True)
                     assert uri.endswith(".csv")
                     # TODO: Dangerous string replacement
                     con.sql(f"create table {row.artifact_name} as from '{uri}'")
@@ -462,39 +507,4 @@ class RunStore:
             .where(self._artifacts.c.artifact_name.in_(artifact_names))
         )
         with self._engine.connect() as conn:
-            return conn.execute(stmt)
-
-    def _get_checksum(self, blob: Any) -> str:
-        return store_handlers.get_class(type(blob)).create_hash(blob)
-
-    def _get_blob_bucket(self, checksum: str) -> list[str]:
-        n_digits = self._hash_granularity * 2  # two hexdigits = 1 byte
-        blob_bucket = [
-            checksum[i * n_digits : (i + 1) * n_digits] for i in range(self._hash_depth)
-        ]
-        return blob_bucket
-
-    def _get_uri_for_checksum(self, checksum: str, resolve_ext: bool = False) -> str:
-        blob_bucket = self._get_blob_bucket(checksum)
-        blob_bucket_dir = self._root_dir / Path(*blob_bucket)
-        blob_bucket_dir.mkdir(exist_ok=True, parents=True)
-        uri_no_ext = blob_bucket_dir / checksum
-        if resolve_ext:
-            uri_matches = list(blob_bucket_dir.glob(checksum + "*"))
-            if len(uri_matches) == 0:
-                raise ValueError("No match.")
-            if len(uri_matches) > 1:
-                raise ValueError("Multiple matches.")
-            return str(uri_matches[0])
-        return str(uri_no_ext)
-
-    def _get_blob_for_checksum(self, checksum: str) -> Any:
-        uri = self._get_uri_for_checksum(checksum, resolve_ext=True)
-        return self._load_from_disk(uri)
-
-    def _save_to_disk(self, blob: Any, uri: str) -> None:
-        store_handlers.get_class(type(blob)).save_to_disk(blob, str(uri))
-
-    def _load_from_disk(self, uri: str) -> None:
-        _, ext = os.path.splitext(os.path.basename(uri))
-        return load_handlers.get_class(ext).load_from_disk(uri)
+            return conn.execute(stmt).all()
