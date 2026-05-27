@@ -8,6 +8,7 @@ import warnings
 from abc import ABC, abstractmethod
 from collections.abc import Generator, Sequence
 from contextlib import contextmanager
+from dataclasses import dataclass, field
 from datetime import datetime
 from os import environ
 from pathlib import Path
@@ -37,6 +38,21 @@ from mldb.registry import Registry, TypeHandlerRegistry
 
 DEFAULT_HASH_DEPTH = 3
 DEFAULT_HASH_GRANULARITY = 1
+
+
+@dataclass
+class RunInfo:
+    run_id: str
+    run_name: str
+    run_timestamp: str
+    tags: list[str] = field(default_factory=list)
+
+
+@dataclass
+class ArtifactInfo:
+    run_id: str
+    artifact_name: str
+    artifact_checksum: str
 
 
 def _require_env(name: str) -> str:
@@ -369,10 +385,38 @@ class RunStore:
         root_dir = _require_env("DATA_ROOT")
         return cls(root_dir=root_dir)
 
-    def list_runs(self, include_tags: list[str], exclude_tags: list[str]) -> list[str]:
-        stmt = self._get_tag_select(include_tags, exclude_tags)
+    def list_runs(
+        self, include_tags: list[str], exclude_tags: list[str]
+    ) -> list[RunInfo]:
+        tag_filter = self._get_tag_select(include_tags, exclude_tags).subquery()
+        stmt = select(self._runs).join(
+            tag_filter, self._runs.c.run_id == tag_filter.c.run_id
+        )
         with self._engine.connect() as conn:
-            return list(conn.execute(stmt).scalars())
+            run_rows = conn.execute(stmt).all()
+        if not run_rows:
+            return []
+        run_ids = [r.run_id for r in run_rows]
+        tags_stmt = select(self._tags).where(self._tags.c.run_id.in_(run_ids))
+        with self._engine.connect() as conn:
+            tag_rows = conn.execute(tags_stmt).all()
+        tags_by_run: dict[str, list[str]] = {r.run_id: [] for r in run_rows}
+        for row in tag_rows:
+            tags_by_run[row.run_id].append(row.tag)
+        return [
+            RunInfo(r.run_id, r.run_name, r.run_timestamp, tags_by_run[r.run_id])
+            for r in run_rows
+        ]
+
+    def list_artifacts(self, run_id: str | None = None) -> list[ArtifactInfo]:
+        stmt = select(self._artifacts)
+        if run_id is not None:
+            stmt = stmt.where(self._artifacts.c.run_id == run_id)
+        with self._engine.connect() as conn:
+            rows = conn.execute(stmt).all()
+        return [
+            ArtifactInfo(r.run_id, r.artifact_name, r.artifact_checksum) for r in rows
+        ]
 
     def create_run(self, name: str, tags: list[str] | None = None) -> str:
         timezone = ZoneInfo("Europe/Berlin")
@@ -394,6 +438,16 @@ class RunStore:
             conn.execute(
                 insert(self._tags),
                 [{"run_id": run_id, "tag": t} for t in tags],
+            )
+            conn.commit()
+
+    def remove_tags(self, run_id: str, tags: list[str]) -> None:
+        with self._engine.connect() as conn:
+            conn.execute(
+                delete(self._tags).where(
+                    self._tags.c.run_id == run_id,
+                    self._tags.c.tag.in_(tags),
+                )
             )
             conn.commit()
 
@@ -448,7 +502,9 @@ class RunStore:
         self, artifact_name: str, include_tags: list[str], exclude_tags: list[str]
     ) -> dict[str, Any]:
         result = dict()
-        for row in self._do_tag_search(artifact_name, include_tags, exclude_tags):
+        for row in self._search_artifacts_by_tags(
+            artifact_name, include_tags, exclude_tags
+        ):
             assert row.run_id not in result, result
             result[row.run_id] = self._blob_store.load(row.artifact_checksum)
         return result
@@ -460,7 +516,7 @@ class RunStore:
         con = duckdb.connect()
         try:
             for artifact_name, include_tags, exclude_tags in args:
-                for row in self._do_tag_search(
+                for row in self._search_artifacts_by_tags(
                     artifact_name, list(include_tags), list(exclude_tags)
                 ):
                     uri = self._blob_store.uri(row.artifact_checksum, resolve_ext=True)
@@ -487,7 +543,7 @@ class RunStore:
             )
         return stmt
 
-    def _do_tag_search(
+    def _search_artifacts_by_tags(
         self,
         artifact_name: str | list[str],
         include_tags: list[str],
