@@ -3,7 +3,6 @@ import io
 import os
 import re
 import shutil
-import sqlite3
 import uuid
 import warnings
 from abc import ABC, abstractmethod
@@ -20,6 +19,19 @@ import numpy as np
 import pandas as pd
 import torch
 from PIL import Image as PILImage
+from sqlalchemy import (
+    Column,
+    MetaData,
+    String,
+    Table,
+    create_engine,
+    delete,
+    insert,
+    select,
+)
+from sqlalchemy.engine import Engine
+from sqlalchemy.exc import NoResultFound
+from sqlalchemy.schema import CreateTable
 
 from mldb.registry import Registry, TypeHandlerRegistry
 
@@ -261,19 +273,6 @@ class TorchStateDictBlob(StorableBlob):
         torch.save(blob, path)
 
 
-# class RunLogger:
-#
-#     def __init__(self) -> None:
-#         pass
-#
-#     def register_run(self, name: str) -> str:
-#         timezone = ZoneInfo("Europe/Berlin")
-#         timestamp = datetime.now(timezone).strftime("%Y-%m-%d %H:%M:%S")
-#         run_id = f"run_{timestamp.replace(' ', '-')}_{name}"
-#         self._sql_execute(f"insert into {self._runs_table} values (?, ?, ?)", [run_id, name, timestamp])
-#         return run_id
-
-
 class RunStore:
     def __init__(
         self,
@@ -286,39 +285,34 @@ class RunStore:
 
         self._root_dir = Path(root_dir)
         self._root_dir.mkdir(exist_ok=True, parents=True)
-        self._db_path: Path = self._root_dir / "index.db"
+        db_path = self._root_dir / "index.db"
 
-        self._artifacts_table = "artifacts"
-        self._execute_sql(
-            f"""
-            create table if not exists {self._artifacts_table} (
-                run_id VARCHAR,
-                artifact_name VARCHAR,
-                artifact_checksum VARCHAR,
-                PRIMARY KEY (run_id, artifact_name)
-            )
-            """
+        self._engine: Engine = create_engine(f"sqlite:///{db_path}")
+        _meta = MetaData()
+        self._artifacts = Table(
+            "artifacts",
+            _meta,
+            Column("run_id", String, primary_key=True),
+            Column("artifact_name", String, primary_key=True),
+            Column("artifact_checksum", String, nullable=False),
         )
-        self._runs_table = "runs"
-        self._execute_sql(
-            f"""
-            create table if not exists {self._runs_table} (
-                run_id VARCHAR PRIMARY KEY,
-                run_name VARCHAR,
-                run_timestamp TIMESTAMP
-            )
-            """
+        self._runs = Table(
+            "runs",
+            _meta,
+            Column("run_id", String, primary_key=True),
+            Column("run_name", String, nullable=False),
+            Column("run_timestamp", String, nullable=False),
         )
-        self._tags_table = "tags"
-        self._execute_sql(
-            f"""
-            create table if not exists {self._tags_table} (
-                run_id VARCHAR,
-                tag VARCHAR,
-                PRIMARY KEY (run_id, tag)
-            )
-            """
+        self._tags = Table(
+            "tags",
+            _meta,
+            Column("run_id", String, primary_key=True),
+            Column("tag", String, primary_key=True),
         )
+        with self._engine.connect() as conn:
+            for table in [self._artifacts, self._runs, self._tags]:
+                conn.execute(CreateTable(table, if_not_exists=True))
+            conn.commit()
 
     @classmethod
     def from_env(cls) -> Self:
@@ -326,157 +320,149 @@ class RunStore:
         return cls(root_dir=root_dir)
 
     def list_runs(self, include_tags: list[str], exclude_tags: list[str]) -> list[str]:
-        tag_query = self._get_tag_query(include_tags, exclude_tags)
-        matching_runs = self._query_column(tag_query, include_tags + exclude_tags)
-        return matching_runs
+        stmt = self._get_tag_select(include_tags, exclude_tags)
+        with self._engine.connect() as conn:
+            return list(conn.execute(stmt).scalars())
 
     def create_run(self, name: str, tags: list[str] | None = None) -> str:
         timezone = ZoneInfo("Europe/Berlin")
         timestamp = datetime.now(timezone).strftime("%Y-%m-%d %H:%M:%S")
         run_id = f"run_{timestamp.replace(' ', '-')}_{uuid.uuid4().hex[:8]}_{name}"
-        self._execute_sql(
-            f"insert into {self._runs_table} values (?, ?, ?)",
-            [run_id, name, timestamp],
-        )
+        with self._engine.connect() as conn:
+            conn.execute(
+                insert(self._runs).values(
+                    run_id=run_id, run_name=name, run_timestamp=timestamp
+                )
+            )
+            conn.commit()
         if tags is not None:
             self.add_tags(run_id, tags)
         return run_id
 
     def add_tags(self, run_id: str, tags: list[str]) -> None:
-        self._executemany_sql(
-            f"insert into {self._tags_table} values (?, ?)",
-            [(run_id, tag) for tag in tags],
-        )
+        with self._engine.connect() as conn:
+            conn.execute(
+                insert(self._tags),
+                [{"run_id": run_id, "tag": t} for t in tags],
+            )
+            conn.commit()
 
     def delete_run(self, run_id: str) -> None:
-        result = self._query_rows(
-            f"""
-            select artifact_checksum
-            from {self._artifacts_table}
-            where run_id = ?
-            and artifact_checksum not in (
-                select artifact_checksum
-                from {self._artifacts_table}
-                where run_id != ?
+        orphaned_stmt = select(self._artifacts.c.artifact_checksum).where(
+            self._artifacts.c.run_id == run_id,
+            ~self._artifacts.c.artifact_checksum.in_(
+                select(self._artifacts.c.artifact_checksum).where(
+                    self._artifacts.c.run_id != run_id
+                )
+            ),
+        )
+        with self._engine.connect() as conn:
+            orphaned_checksums = conn.execute(orphaned_stmt).scalars()
+        with self._engine.connect() as conn:
+            conn.execute(delete(self._runs).where(self._runs.c.run_id == run_id))
+            conn.execute(delete(self._tags).where(self._tags.c.run_id == run_id))
+            conn.execute(
+                delete(self._artifacts).where(self._artifacts.c.run_id == run_id)
             )
-            """,
-            [run_id, run_id],
-        )
-        orphaned_checksums = list(result.get("artifact_checksum", []))
-        self._execute_sql_batch(
-            [
-                (f"delete from {self._runs_table} where run_id = ?", [run_id]),
-                (f"delete from {self._tags_table} where run_id = ?", [run_id]),
-                (f"delete from {self._artifacts_table} where run_id = ?", [run_id]),
-            ]
-        )
+            conn.commit()
         for checksum in orphaned_checksums:
             uri = self._get_uri_for_checksum(checksum, resolve_ext=True)
             os.remove(uri)
 
     def store(self, run_id: str, artifacts: dict[int | str, Any]) -> None:
-        artifact_checksums: Sequence[tuple[str, str, str]] = list()
+        artifact_rows = []
         for key, blob in artifacts.items():
             checksum = self._get_checksum(blob)
             uri = self._get_uri_for_checksum(checksum)
             self._save_to_disk(blob, uri)
-            artifact_checksums.append((run_id, str(key), checksum))
-        self._executemany_sql(
-            f"insert into {self._artifacts_table} values (?, ?, ?)", artifact_checksums
-        )
+            artifact_rows.append(
+                {
+                    "run_id": run_id,
+                    "artifact_name": str(key),
+                    "artifact_checksum": checksum,
+                }
+            )
+        with self._engine.connect() as conn:
+            conn.execute(insert(self._artifacts), artifact_rows)
+            conn.commit()
 
     def load(self, run_id: str, artifact_name: str) -> Any:
-        checksum = self._query_value(
-            f"""
-            select artifact_checksum
-            from {self._artifacts_table}
-            where run_id=? and artifact_name=?
-            """,
-            parameters=[run_id, artifact_name],
+        stmt = select(self._artifacts.c.artifact_checksum).where(
+            self._artifacts.c.run_id == run_id,
+            self._artifacts.c.artifact_name == artifact_name,
         )
-        blob = self._get_blob_for_checksum(checksum)
-        return blob
+        with self._engine.connect() as conn:
+            checksum = conn.execute(stmt).scalar_one_or_none()
+        if checksum is None:
+            raise ValueError(f"Artifact {artifact_name} not found for {run_id}")
+        return self._get_blob_for_checksum(checksum)
 
     def load_by_tags(
         self, artifact_name: str, include_tags: list[str], exclude_tags: list[str]
     ) -> dict[str, Any]:
-        query_result = self._do_tag_search(artifact_name, include_tags, exclude_tags)
         result = dict()
-        for run_id, checksum in zip(
-            query_result["run_id"], query_result["artifact_checksum"]
-        ):
-            assert run_id not in result, result
-            blob = self._get_blob_for_checksum(checksum)
-            result[run_id] = blob
+        for row in self._do_tag_search(artifact_name, include_tags, exclude_tags):
+            assert row.run_id not in result, result
+            result[row.run_id] = self._get_blob_for_checksum(row.artifact_checksum)
         return result
 
     @contextmanager
     def load_duckdb(
         self, *args: tuple[str, tuple[str, ...], tuple[str, ...]]
     ) -> Generator[duckdb.DuckDBPyConnection]:
-        tag_matches = dict()
-        for artifact_name, include_tags, exclude_tags in args:
-            tag_match = self._do_tag_search(
-                artifact_name, list(include_tags), list(exclude_tags)
-            )
-            for k, v in tag_match.items():
-                if k not in tag_matches:
-                    tag_matches[k] = list()
-                tag_matches[k].extend(v)
-        tag_matches_df = pd.DataFrame(tag_matches)
         con = duckdb.connect()
         try:
-            for run_id, name, checksum in zip(
-                tag_matches_df["run_id"],
-                tag_matches_df["artifact_name"],
-                tag_matches_df["artifact_checksum"],
-            ):
-                uri = self._get_uri_for_checksum(checksum, resolve_ext=True)
-                assert uri.endswith(".csv")
-                # TODO: Dangerous string replacement
-                con.sql(f"create table {name} as from '{uri}'")
+            for artifact_name, include_tags, exclude_tags in args:
+                for row in self._do_tag_search(
+                    artifact_name, list(include_tags), list(exclude_tags)
+                ):
+                    uri = self._get_uri_for_checksum(
+                        row.artifact_checksum, resolve_ext=True
+                    )
+                    assert uri.endswith(".csv")
+                    # TODO: Dangerous string replacement
+                    con.sql(f"create table {row.artifact_name} as from '{uri}'")
             yield con
         finally:
             con.close()
 
-    def _get_tag_query(self, include_tags: list[str], exclude_tags: list[str]) -> str:
-        query = ""
-        for i in range(len(include_tags) + len(exclude_tags)):
-            query += """
-                select run_id
-                from tags
-                where tag=?
-            """
-            if i < len(include_tags) - 1:
-                query += "intersect"
-            elif i < len(include_tags) + len(exclude_tags) - 1:
-                query += "except"
-        return query
+    def _get_tag_select(self, include_tags: list[str], exclude_tags: list[str]):
+        stmt = select(self._runs.c.run_id)
+        for tag in include_tags:
+            stmt = stmt.where(
+                self._runs.c.run_id.in_(
+                    select(self._tags.c.run_id).where(self._tags.c.tag == tag)
+                )
+            )
+        for tag in exclude_tags:
+            stmt = stmt.where(
+                ~self._runs.c.run_id.in_(
+                    select(self._tags.c.run_id).where(self._tags.c.tag == tag)
+                )
+            )
+        return stmt
 
     def _do_tag_search(
         self,
         artifact_name: str | list[str],
         include_tags: list[str],
         exclude_tags: list[str],
-    ) -> dict[str, Any]:
-        tags_query = self._get_tag_query(include_tags, exclude_tags)
+    ):
         artifact_names = (
             [artifact_name] if isinstance(artifact_name, str) else artifact_name
         )
-        placeholders = ", ".join("?" * len(artifact_names))
-        # TODO: Use that selection join (semi-join?)
-        query = f"""
-            with matching_runs as ({tags_query})
-            select a.run_id, artifact_name, artifact_checksum
-            from matching_runs r
-            join {self._artifacts_table} a
-            on r.run_id=a.run_id
-            where a.artifact_name IN ({placeholders})
-        """
-        query_result = self._query_rows(
-            query, include_tags + exclude_tags + artifact_names
+        tag_cte = self._get_tag_select(include_tags, exclude_tags).cte()
+        stmt = (
+            select(
+                self._artifacts.c.run_id,
+                self._artifacts.c.artifact_name,
+                self._artifacts.c.artifact_checksum,
+            )
+            .join(tag_cte, self._artifacts.c.run_id == tag_cte.c.run_id)
+            .where(self._artifacts.c.artifact_name.in_(artifact_names))
         )
-        return query_result
+        with self._engine.connect() as conn:
+            return conn.execute(stmt)
 
     def _get_checksum(self, blob: Any) -> str:
         return store_handlers.get_class(type(blob)).create_hash(blob)
@@ -504,83 +490,11 @@ class RunStore:
 
     def _get_blob_for_checksum(self, checksum: str) -> Any:
         uri = self._get_uri_for_checksum(checksum, resolve_ext=True)
-        blob = self._load_from_disk(uri)
-        return blob
+        return self._load_from_disk(uri)
 
     def _save_to_disk(self, blob: Any, uri: str) -> None:
         store_handlers.get_class(type(blob)).save_to_disk(blob, str(uri))
 
     def _load_from_disk(self, uri: str) -> None:
         _, ext = os.path.splitext(os.path.basename(uri))
-        blob = load_handlers.get_class(ext).load_from_disk(uri)
-        return blob
-
-    def _execute_sql(self, query: str, parameters: Sequence[Any] | None = None) -> None:
-        with sqlite3.connect(self._db_path) as con:
-            con.execute(query) if parameters is None else con.execute(query, parameters)
-
-    def _executemany_sql(self, query: str, parameters: Sequence[Any]) -> None:
-        with sqlite3.connect(self._db_path) as con:
-            con.executemany(query, parameters)
-
-    def _execute_sql_batch(
-        self, queries_and_params: list[tuple[str, Sequence[Any] | None]]
-    ) -> None:
-        with sqlite3.connect(self._db_path) as con:
-            for query, params in queries_and_params:
-                con.execute(query) if params is None else con.execute(query, params)
-
-    def _query_result_to_dict(
-        self, column_names: list[str], rows: list[tuple[Any, ...]]
-    ) -> dict[str, list[Any]]:
-        result = dict()
-        for column_name, column_data in zip(column_names, zip(*rows)):
-            result[column_name] = column_data
-        return result
-
-    def _query_value(self, query: str, parameters: Sequence[Any] | None = None) -> Any:
-        with sqlite3.connect(self._db_path) as con:
-            cursor = (
-                con.execute(query)
-                if parameters is None
-                else con.execute(query, parameters)
-            )
-            rows = cursor.fetchall()
-        assert len(rows) == 1, rows
-        assert len(rows[0]) == 1, rows[0]
-        return rows[0][0]
-
-    def _query_column(
-        self, query: str, parameters: Sequence[Any] | None = None
-    ) -> list[Any]:
-        with sqlite3.connect(self._db_path) as con:
-            cursor = (
-                con.execute(query)
-                if parameters is None
-                else con.execute(query, parameters)
-            )
-            rows = cursor.fetchall()
-        assert len(rows) == 0 or len(rows[0]) == 1, rows[0]
-        return [row[0] for row in rows]
-
-    def _query_rows(
-        self, query: str, parameters: Sequence[Any] | None = None
-    ) -> dict[str, list[Any]]:
-        with sqlite3.connect(self._db_path) as con:
-            cursor = (
-                con.execute(query)
-                if parameters is None
-                else con.execute(query, parameters)
-            )
-            rows = cursor.fetchall()
-            column_names = [t[0] for t in cursor.description]
-        return self._query_result_to_dict(column_names, rows)
-
-    def _query_rows_many(
-        self, query: str, parameters: Sequence[Any]
-    ) -> dict[str, list[Any]]:
-        with sqlite3.connect(self._db_path) as con:
-            cursor = con.executemany(query, parameters)
-            rows = cursor.fetchall()
-            column_names = [t[0] for t in cursor.description]
-        return self._query_result_to_dict(column_names, rows)
+        return load_handlers.get_class(ext).load_from_disk(uri)

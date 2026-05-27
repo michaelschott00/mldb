@@ -177,7 +177,7 @@ class ExperimentStoreTests(unittest.TestCase):
         store.delete_run(run_id)
 
         self.assertEqual(len(store.list_runs(["delete_tag"], [])), 0)
-        with self.assertRaises(AssertionError):
+        with self.assertRaises(ValueError):
             store.load(run_id, "array")
 
     def test_delete_run_preserves_shared_artifact(self) -> None:
