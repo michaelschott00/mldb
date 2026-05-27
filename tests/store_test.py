@@ -19,7 +19,7 @@ from mldb.store import RunStore
 @dataclass
 class Environment:
     TESTS_ROOT: Path = Path("tests")
-    DATA_ROOT: Path = TESTS_ROOT / "data"
+    DATA_ROOT: Path = TESTS_ROOT / "test_data"
 
     @classmethod
     def variables(cls) -> Iterator[tuple[str, Path]]:
