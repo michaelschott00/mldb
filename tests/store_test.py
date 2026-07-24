@@ -13,7 +13,7 @@ import pandas as pd
 import torch
 
 # from PIL import Image
-from mldb.store import RunStore
+from mldb.store import RunStore, TableQuery
 
 
 @dataclass
@@ -301,8 +301,8 @@ class ExperimentStoreTests(unittest.TestCase):
         # Analyze results together with dataset metadata
         store = RunStore.from_env()
         with store.load_duckdb(
-            ("attribute_names", ("dataset_1",), ()),
-            ("measurements", ("my_tuning_run",), ()),
+            TableQuery("attribute_names", include_tags=["dataset_1"]),
+            TableQuery("measurements", include_tags=["my_tuning_run"]),
         ) as con:
             df_rec = con.sql(
                 "select * exclude m.img_id from attribute_names n join measurements m on n.img_id=m.img_id"

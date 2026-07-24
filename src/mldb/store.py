@@ -52,6 +52,13 @@ class StoredArtifact:
     artifact: Any
 
 
+@dataclass
+class TableQuery:
+    name: str
+    include_tags: list[str] = field(default_factory=list)
+    exclude_tags: list[str] = field(default_factory=list)
+
+
 def _require_env(name: str) -> str:
     """Return the value of an environment variable, raising if it is unset."""
     val = environ.get(name)
@@ -169,9 +176,15 @@ class RunStore:
         return cls(root_dir=root_dir)
 
     def list_runs(
-        self, include_tags: list[str], exclude_tags: list[str]
+        self,
+        include_tags: list[str] | None = None,
+        exclude_tags: list[str] | None = None,
     ) -> list[RunInfo]:
         """List runs matching the given tag filters, including each run's tags."""
+        if include_tags is None:
+            include_tags = list()
+        if exclude_tags is None:
+            exclude_tags = list()
         tag_filter = self._get_tag_select(include_tags, exclude_tags).subquery()
 
         # Find run_ids matching the tag query
@@ -342,20 +355,26 @@ class RunStore:
         return results
 
     @contextmanager
-    def load_duckdb(
-        self, *args: tuple[str, tuple[str, ...], tuple[str, ...]]
-    ) -> Generator[Any]:
-        """Yield a DuckDB connection with tables created from artifacts matching the given (name, include_tags, exclude_tags) specs."""
+    def load_duckdb(self, *queries: TableQuery) -> Generator[Any]:
+        """Yield a DuckDB connection with tables created from artifacts matching the given queries."""
         import duckdb
 
         con = duckdb.connect()
         try:
-            for artifact_name, include_tags, exclude_tags in args:
-                for row in self._search_artifacts_by_tags(
-                    artifact_name, list(include_tags), list(exclude_tags)
-                ):
+            for query in queries:
+                tables = self._search_artifacts_by_tags(
+                    query.name, query.include_tags, query.exclude_tags
+                )
+                if len(tables) != 1:
+                    raise ValueError(
+                        f"Tag query {query.include_tags}, {query.exclude_tags} matched 0 or >1 artifacts: {tables}"
+                    )
+                for row in tables:
                     uri = self._blob_store.uri(row.artifact_checksum, resolve_ext=True)
-                    assert uri.endswith(".csv")
+                    if not uri.endswith(".csv"):
+                        raise ValueError(
+                            f"Tag query {query.include_tags}, {query.exclude_tags} matched artifacts that aren't tables: {tables}"
+                        )
                     # TODO: Dangerous string replacement
                     con.sql(f"create table {row.artifact_name} as from '{uri}'")
             yield con
