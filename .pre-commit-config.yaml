@@ -1,20 +1,22 @@
 repos:
   - repo: https://github.com/pre-commit/pre-commit-hooks
     rev: v2.3.0
-    stages: [commit]
     hooks:
       - id: check-yaml
+        stages: [pre-commit]
       - id: end-of-file-fixer
+        stages: [pre-commit]
       - id: trailing-whitespace
+        stages: [pre-commit]
   - repo: https://github.com/astral-sh/ruff-pre-commit
     rev: v0.15.14
-    stages: [commit]
     hooks:
       - id: ruff-format
+        stages: [pre-commit]
   - repo: local
-    stages: [push]
     hooks:
       - id: pytest-check
+        stages: [pre-push]
         name: pytest
         entry: pytest --tb=short -q
         language: system
