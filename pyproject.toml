@@ -7,7 +7,7 @@ name = "mldb"
 version = "0.0.1"
 dependencies = [
   "duckdb==1.5.3",
-  "numpy==2.4.6",
+  "numpy==2.2.6",
   "pandas==3.0.3",
   "Pillow==12.2.0",
   "torch==2.11.0",
