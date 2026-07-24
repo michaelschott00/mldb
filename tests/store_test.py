@@ -38,7 +38,7 @@ def _concurrent_worker(
     root_dir: str, data: list, result_queue: multiprocessing.Queue
 ) -> None:
     store = RunStore(root_dir)
-    run_id = store.create_run("concurrent_run")
+    run_id = store.create_run()
     store.store(run_id, {"array": np.array(data)})
     result_queue.put((run_id, data))
 
@@ -57,13 +57,13 @@ class ExperimentStoreTests(unittest.TestCase):
         _ = RunStore(str(Environment.DATA_ROOT))
         self.assertTrue(Environment.DATA_ROOT.exists())
 
-    def _create_experiment(self, tag: str) -> tuple[RunStore, str]:
+    def _create_experiment(self) -> tuple[RunStore, str]:
         store = RunStore.from_env()
-        run_id = store.create_run(tag)
+        run_id = store.create_run()
         return store, run_id
 
     def _test_store_load(self, name: str, blob: Any, assert_func: Callable) -> None:
-        store, run_id = self._create_experiment("store_" + name)
+        store, run_id = self._create_experiment()
         blob_name = f"test_{name}"
         store.store(run_id, {blob_name: blob})
         recovered_blob = store.load(run_id, blob_name)
@@ -102,7 +102,7 @@ class ExperimentStoreTests(unittest.TestCase):
         self._test_store_load("file", file, self.assertEqual)
 
     def test_store_same_data(self) -> None:
-        store, run_id = self._create_experiment("store_same_data")
+        store, run_id = self._create_experiment()
         tensor = torch.Tensor([1, 2, 3])
         array = np.array([1, 2, 3])
         store.store(run_id, {"array": array, "tensor": tensor})
@@ -112,7 +112,7 @@ class ExperimentStoreTests(unittest.TestCase):
         torch.testing.assert_close(tensor, recovered_tensor)
 
     def test_store_same_object(self) -> None:
-        store, run_id = self._create_experiment("store_same_object")
+        store, run_id = self._create_experiment()
         array_1 = np.array([1, 2, 3])
         array_2 = np.array([1, 2, 3])
         store.store(run_id, {"array_1": array_1, "array_2": array_2})
@@ -122,7 +122,7 @@ class ExperimentStoreTests(unittest.TestCase):
         np.testing.assert_equal(array_2, recovered_array_2)
 
     def test_store_same_reference(self) -> None:
-        store, run_id = self._create_experiment("store_same_reference")
+        store, run_id = self._create_experiment()
         array = np.array([1, 2, 3])
         store.store(run_id, {"array_1": array, "array_2": array})
         recovered_array_1 = store.load(run_id, "array_1")
@@ -132,18 +132,20 @@ class ExperimentStoreTests(unittest.TestCase):
 
     def test_add_tags_after_run_creation(self) -> None:
         store = RunStore.from_env()
-        run_id = store.create_run("test_add_tags")
+        run_id = store.create_run()
         store.add_tags(run_id, ["tag1", "tag2"])
-        matched_run_ids = store.list_runs(["tag1", "tag2"], [])
+        matched_run_ids = [r.run_id for r in store.list_runs(["tag1", "tag2"], [])]
         self.assertEqual(len(matched_run_ids), 1)
         self.assertEqual(matched_run_ids[0], run_id)
 
     def test_store_and_query_tags(self) -> None:
         store = RunStore.from_env()
-        _ = store.create_run("test_tags_1", ["tag1", "tag2", "tag3"])
-        run_id_2 = store.create_run("test_tags_2", ["tag2", "tag3", "tag4"])
-        _ = store.create_run("test_tags_3", ["tag3", "tag4"])
-        matched_run_ids = store.list_runs(["tag2", "tag3"], ["tag1"])
+        _ = store.create_run(["tag1", "tag2", "tag3"])
+        run_id_2 = store.create_run(["tag2", "tag3", "tag4"])
+        _ = store.create_run(["tag3", "tag4"])
+        matched_run_ids = [
+            r.run_id for r in store.list_runs(["tag2", "tag3"], ["tag1"])
+        ]
         self.assertEqual(len(matched_run_ids), 1)
         self.assertEqual(run_id_2, matched_run_ids[0])
 
@@ -153,24 +155,24 @@ class ExperimentStoreTests(unittest.TestCase):
         df_2 = pd.DataFrame({"x": [5, 6], "y": [7, 8]})
         df_3 = pd.DataFrame({"x": [9, 10], "y": [11, 12]})
 
-        run_id_1 = store.create_run("run1", ["tag1", "tag2", "tag3"])
-        run_id_2 = store.create_run("run2", ["tag2", "tag3", "tag4"])
-        run_id_3 = store.create_run("run3", ["tag3", "tag4"])
+        run_id_1 = store.create_run(["tag1", "tag2", "tag3"])
+        run_id_2 = store.create_run(["tag2", "tag3", "tag4"])
+        run_id_3 = store.create_run(["tag3", "tag4"])
 
         store.store(run_id_1, {"df": df_1})
         store.store(run_id_2, {"df": df_2})
         store.store(run_id_3, {"df": df_3})
 
         # include tag2+tag3, exclude tag1 → only run2 matches
-        results = store.load_by_tags("df", ["tag2", "tag3"], ["tag1"])
+        results = store.load_by_tags_all("df", ["tag2", "tag3"], ["tag1"])
 
         self.assertEqual(len(results), 1)
-        self.assertTrue(run_id_2 in results)
-        pd.testing.assert_frame_equal(results[run_id_2], df_2)
+        self.assertEqual(results[0].run_id, run_id_2)
+        pd.testing.assert_frame_equal(results[0].artifact, df_2)
 
     def test_delete_run(self) -> None:
         store = RunStore.from_env()
-        run_id = store.create_run("to_delete", ["delete_tag"])
+        run_id = store.create_run(["delete_tag"])
         array = np.array([1, 2, 3])
         store.store(run_id, {"array": array})
 
@@ -183,8 +185,8 @@ class ExperimentStoreTests(unittest.TestCase):
     def test_delete_run_preserves_shared_artifact(self) -> None:
         store = RunStore.from_env()
         array = np.array([1, 2, 3])
-        run_id_1 = store.create_run("run1")
-        run_id_2 = store.create_run("run2")
+        run_id_1 = store.create_run()
+        run_id_2 = store.create_run()
         store.store(run_id_1, {"array": array})
         store.store(run_id_2, {"array": array})
 
@@ -266,15 +268,13 @@ class ExperimentStoreTests(unittest.TestCase):
         ds_run_ids = list()
         for i, df_an in enumerate([df_an_1, df_an_2]):
             store = RunStore.from_env()
-            ds_run_id = store.create_run(
-                f"initialize_dataset_{i + 1}", [f"dataset_{i + 1}"]
-            )
+            ds_run_id = store.create_run([f"dataset_{i + 1}"])
             ds_run_ids.append(ds_run_id)
             store.store(ds_run_id, {"attribute_names": df_an})
 
         # Run experiment on dataset 1
         store = RunStore.from_env()
-        exp_run_id = store.create_run("tryout_param_x", ["my_tuning_run"])
+        exp_run_id = store.create_run(["my_tuning_run"])
         store.store(exp_run_id, {"measurements": df_m})
 
         df = df_an_1.merge(df_m, on="img_id")
@@ -286,10 +286,12 @@ class ExperimentStoreTests(unittest.TestCase):
 
         # Analyze results together with dataset metadata
         store = RunStore.from_env()
-        df_an_rec = store.load_by_tags("attribute_names", ["dataset_1"], [])[
-            ds_run_ids[0]
-        ]
-        df_m_rec = store.load_by_tags("measurements", ["my_tuning_run"], [])[exp_run_id]
+        df_an_rec = store.load_by_tags_single(
+            "attribute_names", ["dataset_1"], []
+        ).artifact
+        df_m_rec = store.load_by_tags_single(
+            "measurements", ["my_tuning_run"], []
+        ).artifact
         df_rec = df_an_rec.merge(df_m_rec, on="img_id")
         pd.testing.assert_frame_equal(df_rec, df)
 
