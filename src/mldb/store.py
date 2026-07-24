@@ -52,13 +52,6 @@ class StoredArtifact:
     artifact: Any
 
 
-@dataclass
-class TableQuery:
-    name: str
-    include_tags: list[str] = field(default_factory=list)
-    exclude_tags: list[str] = field(default_factory=list)
-
-
 def _require_env(name: str) -> str:
     """Return the value of an environment variable, raising if it is unset."""
     val = environ.get(name)
@@ -307,14 +300,61 @@ class RunStore:
             raise ValueError(f"Artifact {artifact_name} not found for {run_id}")
         return self._blob_store.load(checksum)
 
-    def load_by_tags_single(
+    def list_by_tags(
+        self,
+        include_tags: list[str] | None = None,
+        exclude_tags: list[str] | None = None,
+        artifact_name: str | list[str] | None = None,
+    ):
+        """Fetch artifact rows across runs matching the tag filters, optionally restricted to the given artifact name(s). If artifact_name is None, all artifact names are matched."""
+        assert not (include_tags is None and exclude_tags is None), (
+            "Must provide either include_tags, exclude_tags or both."
+        )
+        if include_tags is None:
+            include_tags = list()
+        if exclude_tags is None:
+            exclude_tags = list()
+        tag_cte = self._get_tag_select(include_tags, exclude_tags).cte()
+        stmt = select(
+            self._artifacts.c.run_id,
+            self._artifacts.c.artifact_name,
+            self._artifacts.c.artifact_checksum,
+        ).join(tag_cte, self._artifacts.c.run_id == tag_cte.c.run_id)
+        if artifact_name is not None:
+            artifact_names = (
+                [artifact_name] if isinstance(artifact_name, str) else artifact_name
+            )
+            stmt = stmt.where(self._artifacts.c.artifact_name.in_(artifact_names))
+        with self._engine.connect() as conn:
+            return conn.execute(stmt).all()
+
+    def load_artifacts_by_tags(
+        self,
+        artifact_name: str,
+        include_tags: list[str] | None = None,
+        exclude_tags: list[str] | None = None,
+    ) -> list[StoredArtifact]:
+        """Load blobs of an artifact across all runs matching the given tag filters."""
+        results = list()
+        for row in self.list_by_tags(include_tags, exclude_tags, artifact_name):
+            assert row.run_id not in results, results
+            results.append(
+                StoredArtifact(
+                    row.run_id,
+                    artifact_name,
+                    self._blob_store.load(row.artifact_checksum),
+                )
+            )
+        return results
+
+    def load_artifact_by_tags(
         self,
         artifact_name: str,
         include_tags: list[str] | None = None,
         exclude_tags: list[str] | None = None,
     ) -> StoredArtifact:
         """Load the single blob of an artifact matching the given tag filters, raising if there isn't exactly one match."""
-        results = self.load_by_tags_all(artifact_name, include_tags, exclude_tags)
+        results = self.load_artifacts_by_tags(artifact_name, include_tags, exclude_tags)
         if len(results) == 0:
             raise ValueError(
                 f"Artifact {artifact_name} not found for tag query {include_tags}, {exclude_tags}"
@@ -326,57 +366,23 @@ class RunStore:
             )
         return results[0]
 
-    def load_by_tags_all(
+    @contextmanager
+    def load_duckdb(
         self,
-        artifact_name: str,
         include_tags: list[str] | None = None,
         exclude_tags: list[str] | None = None,
-    ) -> list[StoredArtifact]:
-        """Load blobs of an artifact across all runs matching the given tag filters."""
-        assert not (include_tags is None and exclude_tags is None), (
-            "Must provide either include_tags, exclude_tags or both."
-        )
-        if include_tags is None:
-            include_tags = list()
-        if exclude_tags is None:
-            exclude_tags = list()
-        results = list()
-        for row in self._search_artifacts_by_tags(
-            artifact_name, include_tags, exclude_tags
-        ):
-            assert row.run_id not in results, results
-            results.append(
-                StoredArtifact(
-                    row.run_id,
-                    artifact_name,
-                    self._blob_store.load(row.artifact_checksum),
-                )
-            )
-        return results
-
-    @contextmanager
-    def load_duckdb(self, *queries: TableQuery) -> Generator[Any]:
-        """Yield a DuckDB connection with tables created from artifacts matching the given queries."""
+    ) -> Generator[Any]:
+        """Yield a DuckDB connection with tables created from all CSV artifacts matching the given tag filters."""
         import duckdb
 
         con = duckdb.connect()
         try:
-            for query in queries:
-                tables = self._search_artifacts_by_tags(
-                    query.name, query.include_tags, query.exclude_tags
-                )
-                if len(tables) != 1:
-                    raise ValueError(
-                        f"Tag query {query.include_tags}, {query.exclude_tags} matched 0 or >1 artifacts: {tables}"
-                    )
-                for row in tables:
-                    uri = self._blob_store.uri(row.artifact_checksum, resolve_ext=True)
-                    if not uri.endswith(".csv"):
-                        raise ValueError(
-                            f"Tag query {query.include_tags}, {query.exclude_tags} matched artifacts that aren't tables: {tables}"
-                        )
-                    # TODO: Dangerous string replacement
-                    con.sql(f"create table {row.artifact_name} as from '{uri}'")
+            for row in self.list_by_tags(include_tags, exclude_tags):
+                uri = self._blob_store.uri(row.artifact_checksum, resolve_ext=True)
+                if not uri.endswith(".csv"):
+                    continue
+                # TODO: Dangerous string replacement
+                con.sql(f"create table {row.artifact_name} as from '{uri}'")
             yield con
         finally:
             con.close()
@@ -397,26 +403,3 @@ class RunStore:
                 )
             )
         return stmt
-
-    def _search_artifacts_by_tags(
-        self,
-        artifact_name: str | list[str],
-        include_tags: list[str],
-        exclude_tags: list[str],
-    ):
-        """Fetch artifact rows for the given artifact name(s) across runs matching the tag filters."""
-        artifact_names = (
-            [artifact_name] if isinstance(artifact_name, str) else artifact_name
-        )
-        tag_cte = self._get_tag_select(include_tags, exclude_tags).cte()
-        stmt = (
-            select(
-                self._artifacts.c.run_id,
-                self._artifacts.c.artifact_name,
-                self._artifacts.c.artifact_checksum,
-            )
-            .join(tag_cte, self._artifacts.c.run_id == tag_cte.c.run_id)
-            .where(self._artifacts.c.artifact_name.in_(artifact_names))
-        )
-        with self._engine.connect() as conn:
-            return conn.execute(stmt).all()

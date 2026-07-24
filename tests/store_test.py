@@ -13,7 +13,7 @@ import pandas as pd
 import torch
 
 # from PIL import Image
-from mldb.store import RunStore, TableQuery
+from mldb.store import RunStore
 
 
 @dataclass
@@ -268,13 +268,16 @@ class ExperimentStoreTests(unittest.TestCase):
         ds_run_ids = list()
         for i, df_an in enumerate([df_an_1, df_an_2]):
             store = RunStore.from_env()
-            ds_run_id = store.create_run([f"dataset_{i + 1}"])
+            tags = [f"dataset_{i + 1}"]
+            if i == 0:
+                tags.append("workflow_demo")
+            ds_run_id = store.create_run(tags)
             ds_run_ids.append(ds_run_id)
             store.store(ds_run_id, {"attribute_names": df_an})
 
         # Run experiment on dataset 1
         store = RunStore.from_env()
-        exp_run_id = store.create_run(["my_tuning_run"])
+        exp_run_id = store.create_run(["my_tuning_run", "workflow_demo"])
         store.store(exp_run_id, {"measurements": df_m})
 
         df = df_an_1.merge(df_m, on="img_id")
@@ -300,10 +303,7 @@ class ExperimentStoreTests(unittest.TestCase):
 
         # Analyze results together with dataset metadata
         store = RunStore.from_env()
-        with store.load_duckdb(
-            TableQuery("attribute_names", include_tags=["dataset_1"]),
-            TableQuery("measurements", include_tags=["my_tuning_run"]),
-        ) as con:
+        with store.load_duckdb(include_tags=["workflow_demo"]) as con:
             df_rec = con.sql(
                 "select * exclude m.img_id from attribute_names n join measurements m on n.img_id=m.img_id"
             ).df()
