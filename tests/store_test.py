@@ -134,20 +134,29 @@ class ExperimentStoreTests(unittest.TestCase):
         store = RunStore.from_env()
         run_id = store.create_run()
         store.add_tags(run_id, ["tag1", "tag2"])
-        matched_run_ids = [r.run_id for r in store.list_runs(["tag1", "tag2"], [])]
+        matched_run_ids = [r.run_id for r in store.list_runs(tags=["tag1", "tag2"])]
         self.assertEqual(len(matched_run_ids), 1)
         self.assertEqual(matched_run_ids[0], run_id)
 
     def test_store_and_query_tags(self) -> None:
         store = RunStore.from_env()
-        _ = store.create_run(["tag1", "tag2", "tag3"])
+        run_id_1 = store.create_run(["tag1", "tag2", "tag3"])
         run_id_2 = store.create_run(["tag2", "tag3", "tag4"])
-        _ = store.create_run(["tag3", "tag4"])
-        matched_run_ids = [
-            r.run_id for r in store.list_runs(["tag2", "tag3"], ["tag1"])
-        ]
-        self.assertEqual(len(matched_run_ids), 1)
-        self.assertEqual(run_id_2, matched_run_ids[0])
+        _ = store.create_run(["tag4", "tag5"])
+        matched_run_ids = [r.run_id for r in store.list_runs(tags=["tag2", "tag3"])]
+        self.assertEqual(len(matched_run_ids), 2)
+        self.assertEqual([run_id_1, run_id_2], matched_run_ids)
+
+    def test_store_and_query_tags_empty_tags(self) -> None:
+        store = RunStore.from_env()
+        run_id_1 = store.create_run(["tag1", "tag2", "tag3"])
+        run_id_2 = store.create_run(["tag2", "tag3", "tag4"])
+        run_id_3 = store.create_run(["tag4", "tag5"])
+        matched_run_ids_list = [r.run_id for r in store.list_runs(tags=[])]
+        matched_run_ids_none = [r.run_id for r in store.list_runs(tags=None)]
+        self.assertEqual(len(matched_run_ids_list), 3)
+        self.assertEqual([run_id_1, run_id_2, run_id_3], matched_run_ids_list)
+        self.assertEqual(sorted(matched_run_ids_list), sorted(matched_run_ids_none))
 
     def test_load_by_tags(self) -> None:
         store = RunStore.from_env()
@@ -156,19 +165,24 @@ class ExperimentStoreTests(unittest.TestCase):
         df_3 = pd.DataFrame({"x": [9, 10], "y": [11, 12]})
 
         run_id_1 = store.create_run(["tag1", "tag2", "tag3"])
-        run_id_2 = store.create_run(["tag2", "tag3", "tag4"])
+        run_id_2 = store.create_run(["tag1", "tag4"])
         run_id_3 = store.create_run(["tag3", "tag4"])
 
         store.store(run_id_1, {"df": df_1})
         store.store(run_id_2, {"df": df_2})
         store.store(run_id_3, {"df": df_3})
 
-        # include tag2+tag3, exclude tag1 → only run2 matches
-        results = store.load_artifacts_by_tags("df", ["tag2", "tag3"], ["tag1"])
+        results = store.load_artifacts_by_query(names=["df"], tags=["tag2", "tag3"])
+        retrieved_run_ids = {r.run_id for r in results}
 
-        self.assertEqual(len(results), 1)
-        self.assertEqual(results[0].run_id, run_id_2)
-        pd.testing.assert_frame_equal(results[0].artifact, df_2)
+        self.assertEqual(len(results), 2)
+        self.assertTrue(run_id_1 in retrieved_run_ids)
+        self.assertTrue(run_id_3 in retrieved_run_ids)
+        for r in results:
+            if r.run_id == run_id_1:
+                pd.testing.assert_frame_equal(r.artifact, df_1)
+            if r.run_id == run_id_3:
+                pd.testing.assert_frame_equal(r.artifact, df_3)
 
     def test_delete_run(self) -> None:
         store = RunStore.from_env()
@@ -178,7 +192,7 @@ class ExperimentStoreTests(unittest.TestCase):
 
         store.delete_run(run_id)
 
-        self.assertEqual(len(store.list_runs(["delete_tag"], [])), 0)
+        self.assertEqual(len(store.list_runs(tags=["delete_tag"])), 0)
         with self.assertRaises(ValueError):
             store.load(run_id, "array")
 
@@ -285,16 +299,16 @@ class ExperimentStoreTests(unittest.TestCase):
         return ds_run_ids, exp_run_id, df_an_1, df_an_2, df_m, df
 
     def test_dataset_pandas_workflow(self) -> None:
-        ds_run_ids, exp_run_id, _, _, _, df = self._prepare_workflow_test_data()
+        _, _, _, _, _, df = self._prepare_workflow_test_data()
 
         # Analyze results together with dataset metadata
         store = RunStore.from_env()
-        df_an_rec = store.load_artifact_by_tags(
-            "attribute_names", ["dataset_1"], []
-        ).artifact
-        df_m_rec = store.load_artifact_by_tags(
-            "measurements", ["my_tuning_run"], []
-        ).artifact
+        df_an_rec = store.load_artifact_by_query(
+            name="attribute_names", tags=["dataset_1"]
+        )
+        df_m_rec = store.load_artifact_by_query(
+            name="measurements", tags=["my_tuning_run"]
+        )
         df_rec = df_an_rec.merge(df_m_rec, on="img_id")
         pd.testing.assert_frame_equal(df_rec, df)
 
@@ -303,7 +317,7 @@ class ExperimentStoreTests(unittest.TestCase):
 
         # Analyze results together with dataset metadata
         store = RunStore.from_env()
-        with store.load_duckdb(include_tags=["workflow_demo"]) as con:
+        with store.load_duckdb(tags=["workflow_demo"]) as con:
             df_rec = con.sql(
                 "select * exclude m.img_id from attribute_names n join measurements m on n.img_id=m.img_id"
             ).df()

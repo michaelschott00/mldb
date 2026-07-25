@@ -1,6 +1,5 @@
 # SQLAlchemy
 
-import sqlite3
 from dataclasses import dataclass
 
 import pandas as pd
@@ -11,8 +10,6 @@ from sqlalchemy import (
     Table,
     and_,
     create_engine,
-    delete,
-    insert,
     or_,
     select,
 )
@@ -97,6 +94,7 @@ hparam_df = pd.DataFrame(
 )
 
 # SQL alchemy setup
+
 _engine: Engine = create_engine(f"sqlite:///:memory:")
 
 tag_df.to_sql("tags", _engine, if_exists="replace")
@@ -129,27 +127,27 @@ _tags = Table(
 
 
 @dataclass
-class spec:
-    tables: list[str]
+class query:
+    names: list[str]
     hparams: dict[str, str] | None = None
     collections: list[str] | None = None
 
 
 specs = (
-    spec(
-        tables=["predictions_train", "predictions_val", "predictions_test"],
+    query(
+        names=["predictions_train", "predictions_val", "predictions_test"],
         hparams={"eval_logs": "log_loss", "lr": "1e-3"},
         collections=["xgboost_baseline", "xgboost_best"],
     ),
-    spec(tables=["dataset"], collections=["german"]),
+    query(names=["dataset"], collections=["german"]),
 )
+
+# SQL Query
 
 hparams = []
 for entry in specs:
     if entry.hparams is not None:
         hparams.extend(list(entry.hparams.keys()))
-
-# SQL Query
 
 hs = [aliased(_hparams) for _ in range(len(hparams))]
 cte = select(hs[0].c.run_id, *[h.c.value.label(n) for h, n in zip(hs, hparams)])
@@ -168,7 +166,7 @@ cte = cte.cte()
 outer_conds = []
 for entry in specs:
     inner_conds = []
-    inner_conds.append(_artifacts.c.artifact_name.in_(entry.tables))
+    inner_conds.append(_artifacts.c.artifact_name.in_(entry.names))
     if entry.collections is not None:
         inner_conds.append(_tags.c.tag.in_(entry.collections))
     if entry.hparams is not None:
@@ -187,7 +185,9 @@ stmt = (
     .outerjoin(cte, _tags.c.run_id == cte.c.run_id)
     .where(or_(*outer_conds))
 )
-print(str(stmt))
+
+# Print result
+
 with _engine.connect() as conn:
     for table in [_artifacts, _hparams, _tags]:
         conn.execute(CreateTable(table, if_not_exists=True))

@@ -48,11 +48,10 @@ def main() -> None:
 @main.command("list", context_settings={"ignore_unknown_options": True})
 @click.argument("tags", nargs=-1, type=click.UNPROCESSED)
 def list_runs(tags: tuple[str, ...]) -> None:
-    """List runs, optionally filtered by tags (+include / -exclude)."""
-    include_tags, exclude_tags = _parse_tags(tags)
+    """List runs, optionally filtered by tags."""
     store = RunStore.from_env()
     try:
-        runs = store.list_runs(include_tags, exclude_tags)
+        runs = store.list_runs(tags=list(tags))
     finally:
         store.close()
     _print_runs(runs)
@@ -82,7 +81,7 @@ def list_artifacts(run_id: str | None) -> None:
     """List stored artifacts, optionally filtered to a single run."""
     store = RunStore.from_env()
     try:
-        artifacts = store.list_artifacts(run_id)
+        artifacts = store.list_artifacts_by_run(run_id)
     finally:
         store.close()
     _print_artifacts(artifacts, show_run_id=run_id is None)
@@ -92,19 +91,18 @@ def list_artifacts(run_id: str | None) -> None:
 @click.argument("args", nargs=-1, type=click.UNPROCESSED, required=True)
 def delete_runs(args: tuple[str, ...]) -> None:
     """Delete a run by id, or all runs matching a tag query (+include / -exclude)."""
-    is_tag_query = any(a.startswith("+") or a.startswith("-") for a in args)
+    is_tag_query = not any(a.startswith("run_") for a in args)
     store = RunStore.from_env()
     try:
         if is_tag_query:
-            include_tags, exclude_tags = _parse_tags(args)
-            runs = store.list_runs(include_tags, exclude_tags)
+            runs = store.list_runs(tags=list(args))
             for run in runs:
                 store.delete_run(run.run_id)
                 click.echo(f"Deleted {run.run_id}")
         else:
             if len(args) != 1:
                 raise click.UsageError(
-                    "Provide exactly one run_id, or use +/- prefixed tags to delete by query"
+                    "Provide exactly one run_id, or use tags to delete by query"
                 )
             store.delete_run(args[0])
             click.echo(f"Deleted {args[0]}")

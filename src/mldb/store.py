@@ -168,22 +168,41 @@ class RunStore:
         root_dir = _require_env("DATA_ROOT")
         return cls(root_dir=root_dir)
 
+    def create_run(self, tags: list[str] | None = None) -> str:
+        """Create a new run with a generated ID and name, recording its timestamp and optional tags."""
+        name = generate_name()
+        timezone = ZoneInfo("Europe/Berlin")
+        timestamp = datetime.now(timezone).strftime("%Y-%m-%d %H:%M:%S")
+        run_id = f"run_{timestamp.replace(' ', '-')}_{uuid.uuid4().hex[:8]}_{name}"
+        with self._engine.connect() as conn:
+            conn.execute(
+                insert(self._runs).values(
+                    run_id=run_id, run_name=name, run_timestamp=timestamp
+                )
+            )
+            conn.commit()
+        if tags is not None:
+            self.add_tags(run_id, tags)
+        return run_id
+
     def list_runs(
         self,
-        include_tags: list[str] | None = None,
-        exclude_tags: list[str] | None = None,
+        hparams: dict[str, str] | None = None,
+        tags: list[str] | None = None,
     ) -> list[RunInfo]:
         """List runs matching the given tag filters, including each run's tags."""
-        if include_tags is None:
-            include_tags = list()
-        if exclude_tags is None:
-            exclude_tags = list()
-        tag_filter = self._get_tag_select(include_tags, exclude_tags).subquery()
-
+        if hparams is not None:
+            raise NotImplemented("hparams parameter not yet implemented")
         # Find run_ids matching the tag query
-        stmt = select(self._runs).join(
-            tag_filter, self._runs.c.run_id == tag_filter.c.run_id
-        )
+        if tags is not None and len(tags) > 0:
+            stmt = (
+                select(self._runs)
+                .distinct()
+                .join(self._tags, self._runs.c.run_id == self._tags.c.run_id)
+                .where(self._tags.c.tag.in_(tags))
+            )
+        else:
+            stmt = select(self._runs)
         with self._engine.connect() as conn:
             run_rows = conn.execute(stmt).all()
         if not run_rows:
@@ -201,34 +220,6 @@ class RunStore:
             RunInfo(r.run_id, r.run_name, r.run_timestamp, tags_by_run[r.run_id])
             for r in run_rows
         ]
-
-    def list_artifacts(self, run_id: str | None = None) -> list[ArtifactInfo]:
-        """List artifacts, optionally filtered to a single run."""
-        stmt = select(self._artifacts)
-        if run_id is not None:
-            stmt = stmt.where(self._artifacts.c.run_id == run_id)
-        with self._engine.connect() as conn:
-            rows = conn.execute(stmt).all()
-        return [
-            ArtifactInfo(r.run_id, r.artifact_name, r.artifact_checksum) for r in rows
-        ]
-
-    def create_run(self, tags: list[str] | None = None) -> str:
-        """Create a new run with a generated ID and name, recording its timestamp and optional tags."""
-        name = generate_name()
-        timezone = ZoneInfo("Europe/Berlin")
-        timestamp = datetime.now(timezone).strftime("%Y-%m-%d %H:%M:%S")
-        run_id = f"run_{timestamp.replace(' ', '-')}_{uuid.uuid4().hex[:8]}_{name}"
-        with self._engine.connect() as conn:
-            conn.execute(
-                insert(self._runs).values(
-                    run_id=run_id, run_name=name, run_timestamp=timestamp
-                )
-            )
-            conn.commit()
-        if tags is not None:
-            self.add_tags(run_id, tags)
-        return run_id
 
     def add_tags(self, run_id: str, tags: list[str]) -> None:
         """Attach the given tags to a run."""
@@ -300,84 +291,91 @@ class RunStore:
             raise ValueError(f"Artifact {artifact_name} not found for {run_id}")
         return self._blob_store.load(checksum)
 
-    def list_by_tags(
-        self,
-        include_tags: list[str] | None = None,
-        exclude_tags: list[str] | None = None,
-        artifact_name: str | list[str] | None = None,
-    ):
-        """Fetch artifact rows across runs matching the tag filters, optionally restricted to the given artifact name(s). If artifact_name is None, all artifact names are matched."""
-        assert not (include_tags is None and exclude_tags is None), (
-            "Must provide either include_tags, exclude_tags or both."
-        )
-        if include_tags is None:
-            include_tags = list()
-        if exclude_tags is None:
-            exclude_tags = list()
-        tag_cte = self._get_tag_select(include_tags, exclude_tags).cte()
-        stmt = select(
-            self._artifacts.c.run_id,
-            self._artifacts.c.artifact_name,
-            self._artifacts.c.artifact_checksum,
-        ).join(tag_cte, self._artifacts.c.run_id == tag_cte.c.run_id)
-        if artifact_name is not None:
-            artifact_names = (
-                [artifact_name] if isinstance(artifact_name, str) else artifact_name
-            )
-            stmt = stmt.where(self._artifacts.c.artifact_name.in_(artifact_names))
+    def list_artifacts_by_run(self, run_id: str | None = None) -> list[ArtifactInfo]:
+        """List artifacts, optionally filtered to a single run."""
+        stmt = select(self._artifacts)
+        if run_id is not None:
+            stmt = stmt.where(self._artifacts.c.run_id == run_id)
         with self._engine.connect() as conn:
-            return conn.execute(stmt).all()
+            rows = conn.execute(stmt).all()
+        return [
+            ArtifactInfo(r.run_id, r.artifact_name, r.artifact_checksum) for r in rows
+        ]
 
-    def load_artifacts_by_tags(
+    def list_artifacts_by_query(
         self,
-        artifact_name: str,
-        include_tags: list[str] | None = None,
-        exclude_tags: list[str] | None = None,
+        names: list[str] | None = None,
+        hparams: list[str] | None = None,
+        tags: list[str] | None = None,
+    ) -> list[ArtifactInfo]:
+        """Fetch artifact rows across runs matching the tag filters, optionally restricted to the given artifact name(s). If artifact_name is None, all artifact names are matched."""
+        if hparams is not None:
+            raise NotImplemented("hparams parameter not yet implemented")
+        if names is None and hparams is None and tags is None:
+            raise ValueError("Must specify at least one of names, hparams or tags")
+        stmt = select(self._artifacts).distinct()
+        if names is not None:
+            stmt = stmt.where(self._artifacts.c.artifact_name.in_(names))
+        if tags is not None:
+            stmt = stmt.join(
+                self._tags, self._tags.c.run_id == self._artifacts.c.run_id
+            ).where(self._tags.c.tag.in_(tags))
+        with self._engine.connect() as conn:
+            rows = conn.execute(stmt).all()
+        return [
+            ArtifactInfo(r.run_id, r.artifact_name, r.artifact_checksum) for r in rows
+        ]
+
+    def load_artifacts_by_query(
+        self,
+        names: list[str] | None = None,
+        hparams: list[str] | None = None,
+        tags: list[str] | None = None,
     ) -> list[StoredArtifact]:
         """Load blobs of an artifact across all runs matching the given tag filters."""
+        if hparams is not None:
+            raise NotImplemented("hparams parameter not yet implemented")
         results = list()
-        for row in self.list_by_tags(include_tags, exclude_tags, artifact_name):
+        for row in self.list_artifacts_by_query(names, hparams, tags):
             assert row.run_id not in results, results
             results.append(
                 StoredArtifact(
                     row.run_id,
-                    artifact_name,
+                    row.artifact_name,
                     self._blob_store.load(row.artifact_checksum),
                 )
             )
         return results
 
-    def load_artifact_by_tags(
+    def load_artifact_by_query(
         self,
-        artifact_name: str,
-        include_tags: list[str] | None = None,
-        exclude_tags: list[str] | None = None,
-    ) -> StoredArtifact:
+        name: str,
+        hparams: list[str] | None = None,
+        tags: list[str] | None = None,
+    ) -> Any:
         """Load the single blob of an artifact matching the given tag filters, raising if there isn't exactly one match."""
-        results = self.load_artifacts_by_tags(artifact_name, include_tags, exclude_tags)
+        if hparams is not None:
+            raise NotImplemented("hparams parameter not yet implemented")
+        results = self.load_artifacts_by_query([name], hparams, tags)
         if len(results) == 0:
             raise ValueError(
-                f"Artifact {artifact_name} not found for tag query {include_tags}, {exclude_tags}"
+                f"Artifacts {name} not found for tag query {hparams}, {tags}"
             )
         if len(results) > 1:
             raise ValueError(
-                f"Tag query {include_tags}, {exclude_tags} returned more than one result for {artifact_name}."
+                f"Tag query {hparams}, {tags} returned more than one result for {name}."
                 "Change tag query or use load_artifacts_by_tags to get a list of all matches."
             )
-        return results[0]
+        return results[0].artifact
 
     @contextmanager
-    def load_duckdb(
-        self,
-        include_tags: list[str] | None = None,
-        exclude_tags: list[str] | None = None,
-    ) -> Generator[Any]:
+    def load_duckdb(self, tags: list[str] | None = None) -> Generator[Any]:
         """Yield a DuckDB connection with tables created from all CSV artifacts matching the given tag filters."""
         import duckdb
 
         con = duckdb.connect()
         try:
-            for row in self.list_by_tags(include_tags, exclude_tags):
+            for row in self.list_artifacts_by_query(tags):
                 uri = self._blob_store.uri(row.artifact_checksum, resolve_ext=True)
                 if not uri.endswith(".csv"):
                     continue
@@ -386,20 +384,3 @@ class RunStore:
             yield con
         finally:
             con.close()
-
-    def _get_tag_select(self, include_tags: list[str], exclude_tags: list[str]):
-        """Build a select statement for run IDs having all include_tags and none of exclude_tags."""
-        stmt = select(self._runs.c.run_id)
-        for tag in include_tags:
-            stmt = stmt.where(
-                self._runs.c.run_id.in_(
-                    select(self._tags.c.run_id).where(self._tags.c.tag == tag)
-                )
-            )
-        for tag in exclude_tags:
-            stmt = stmt.where(
-                ~self._runs.c.run_id.in_(
-                    select(self._tags.c.run_id).where(self._tags.c.tag == tag)
-                )
-            )
-        return stmt
