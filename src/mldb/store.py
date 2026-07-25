@@ -305,7 +305,7 @@ class RunStore:
     def list_artifacts_by_query(
         self,
         names: list[str] | None = None,
-        hparams: list[str] | None = None,
+        hparams: dict[str, str] | None = None,
         tags: list[str] | None = None,
     ) -> list[ArtifactInfo]:
         """Fetch artifact rows across runs matching the tag filters, optionally restricted to the given artifact name(s). If artifact_name is None, all artifact names are matched."""
@@ -368,15 +368,36 @@ class RunStore:
             )
         return results[0].artifact
 
+    def get_db(self) -> ResultsDatabase:
+        return ResultsDatabase(self)
+
+
+class ResultsDatabase:
+    def __init__(self, store: RunStore) -> None:
+        self._store = store
+        self._tables: list[ArtifactInfo] = list()
+
+    def attach(
+        self,
+        names: list[str] | None,
+        hparams: dict[str, str] | None = None,
+        tags: list[str] | None = None,
+    ) -> None:
+        for artifact in self._store.list_artifacts_by_query(names, hparams, tags):
+            if artifact not in self._tables:
+                self._tables.append(artifact)
+
     @contextmanager
-    def load_duckdb(self, tags: list[str] | None = None) -> Generator[Any]:
+    def connect(self) -> Generator[Any]:
         """Yield a DuckDB connection with tables created from all CSV artifacts matching the given tag filters."""
         import duckdb
 
         con = duckdb.connect()
         try:
-            for row in self.list_artifacts_by_query(tags):
-                uri = self._blob_store.uri(row.artifact_checksum, resolve_ext=True)
+            for row in self._tables:
+                uri = self._store._blob_store.uri(
+                    row.artifact_checksum, resolve_ext=True
+                )
                 if not uri.endswith(".csv"):
                     continue
                 # TODO: Dangerous string replacement

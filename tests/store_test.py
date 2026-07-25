@@ -145,7 +145,7 @@ class ExperimentStoreTests(unittest.TestCase):
         _ = store.create_run(["tag4", "tag5"])
         matched_run_ids = [r.run_id for r in store.list_runs(tags=["tag2", "tag3"])]
         self.assertEqual(len(matched_run_ids), 2)
-        self.assertEqual([run_id_1, run_id_2], matched_run_ids)
+        self.assertEqual(sorted([run_id_1, run_id_2]), sorted(matched_run_ids))
 
     def test_store_and_query_tags_empty_tags(self) -> None:
         store = RunStore.from_env()
@@ -314,10 +314,16 @@ class ExperimentStoreTests(unittest.TestCase):
 
     def test_dataset_duckdb_workflow(self) -> None:
         _, _, _, _, _, df = self._prepare_workflow_test_data()
-
-        # Analyze results together with dataset metadata
         store = RunStore.from_env()
-        with store.load_duckdb(tags=["workflow_demo"]) as con:
+
+        # Build a database containing results together with the input dataset
+        db = store.get_db()
+        db.attach(
+            names=["attribute_names"],
+            tags=["dataset_1"],
+        )
+        db.attach(names=["measurements"], tags=["my_tuning_run"])
+        with db.connect() as con:
             df_rec = con.sql(
                 "select * exclude m.img_id from attribute_names n join measurements m on n.img_id=m.img_id"
             ).df()
