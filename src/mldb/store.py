@@ -362,7 +362,7 @@ class RunStore:
         if len(results) > 1:
             raise ValueError(
                 f"Tag query {include_tags}, {exclude_tags} returned more than one result for {artifact_name}."
-                "Change tag query or use load_by_tags_all to get a list of all matches."
+                "Change tag query or use load_artifacts_by_tags to get a list of all matches."
             )
         return results[0]
 

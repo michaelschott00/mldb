@@ -1,4 +1,5 @@
 import io
+import uuid
 
 import pandas as pd
 import requests
@@ -51,28 +52,37 @@ GERMAN_COLUMNS = [
 ]
 
 
+def _add_uuid_column(df: pd.DataFrame) -> pd.DataFrame:
+    """Add a uuid column identifying each row, so results can be joined back to it without storing the full dataset again."""
+    df = df.copy()
+    df.insert(0, "uuid", [str(uuid.uuid4()) for _ in range(len(df))])
+    return df
+
+
 def download_adult() -> pd.DataFrame:
     """Download and parse the UCI Adult dataset."""
     response = requests.get(ADULT_URL)
     response.raise_for_status()
-    return pd.read_csv(
+    df = pd.read_csv(
         io.StringIO(response.text),
         names=ADULT_COLUMNS,
         sep=",",
         skipinitialspace=True,
         na_values="?",
     ).dropna()
+    return _add_uuid_column(df)
 
 
 def download_german() -> pd.DataFrame:
     """Download and parse the UCI Statlog German Credit dataset."""
     response = requests.get(GERMAN_URL)
     response.raise_for_status()
-    return pd.read_csv(
+    df = pd.read_csv(
         io.StringIO(response.text),
         names=GERMAN_COLUMNS,
         sep=r"\s+",
     )
+    return _add_uuid_column(df)
 
 
 def main() -> None:

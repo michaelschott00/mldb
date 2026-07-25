@@ -164,7 +164,7 @@ class ExperimentStoreTests(unittest.TestCase):
         store.store(run_id_3, {"df": df_3})
 
         # include tag2+tag3, exclude tag1 → only run2 matches
-        results = store.load_by_tags_all("df", ["tag2", "tag3"], ["tag1"])
+        results = store.load_artifacts_by_tags("df", ["tag2", "tag3"], ["tag1"])
 
         self.assertEqual(len(results), 1)
         self.assertEqual(results[0].run_id, run_id_2)
@@ -289,10 +289,10 @@ class ExperimentStoreTests(unittest.TestCase):
 
         # Analyze results together with dataset metadata
         store = RunStore.from_env()
-        df_an_rec = store.load_by_tags_single(
+        df_an_rec = store.load_artifact_by_tags(
             "attribute_names", ["dataset_1"], []
         ).artifact
-        df_m_rec = store.load_by_tags_single(
+        df_m_rec = store.load_artifact_by_tags(
             "measurements", ["my_tuning_run"], []
         ).artifact
         df_rec = df_an_rec.merge(df_m_rec, on="img_id")
