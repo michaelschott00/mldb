@@ -131,14 +131,14 @@ _tags = Table(
 @dataclass
 class spec:
     tables: list[str]
-    hparams: dict[str, list[str]] | None = None
+    hparams: dict[str, str] | None = None
     collections: list[str] | None = None
 
 
 specs = (
     spec(
         tables=["predictions_train", "predictions_val", "predictions_test"],
-        hparams={"eval_logs": ["logloss"], "lr": ["1e-3", "1e-2"]},
+        hparams={"eval_logs": "log_loss", "lr": "1e-3"},
         collections=["xgboost_baseline", "xgboost_best"],
     ),
     spec(tables=["dataset"], collections=["german"]),
@@ -151,46 +151,43 @@ for entry in specs:
 
 # SQL Query
 
-aliases = [aliased(_hparams) for _ in range(len(hparams))]
-h1 = aliased(_hparams)
-h2 = aliased(_hparams)
-cte = (
-    select(h1.c.run_id, h1.c.value.label("eval_logs"), h2.c.value.label("lr"))
-    .join_from(
-        h1,
-        h2,
+hs = [aliased(_hparams) for _ in range(len(hparams))]
+cte = select(hs[0].c.run_id, *[h.c.value.label(n) for h, n in zip(hs, hparams)])
+for h, hparam in zip(hs[1:], hparams[1:]):
+    cte = cte.join_from(
+        hs[0],
+        h,
         and_(
-            h1.c.run_id == h2.c.run_id,
-            h1.c.hparam == "eval_logs",
-            h2.c.hparam == "lr",
+            hs[0].c.run_id == h.c.run_id,
+            hs[0].c.hparam == hparams[0],
+            h.c.hparam == hparam,
         ),
     )
-    .cte()
-)
+cte = cte.cte()
+
+outer_conds = []
+for entry in specs:
+    inner_conds = []
+    inner_conds.append(_artifacts.c.artifact_name.in_(entry.tables))
+    if entry.collections is not None:
+        inner_conds.append(_tags.c.tag.in_(entry.collections))
+    if entry.hparams is not None:
+        for name, value in entry.hparams.items():
+            inner_conds.append(getattr(cte.c, name) == value)
+    outer_conds.append(and_(*inner_conds))
+
 stmt = (
     select(
         _artifacts.c.run_id,
         _artifacts.c.artifact_name,
         _tags.c.tag,
-        cte.c.eval_logs,
-        cte.c.lr,
+        cte,
     )
     .join(_tags, _tags.c.run_id == _artifacts.c.run_id)
     .outerjoin(cte, _tags.c.run_id == cte.c.run_id)
-    .where(
-        or_(
-            and_(
-                _tags.c.tag.in_(["xgboost_baseline", "xgboost_best"]),
-                cte.c.eval_logs == "log_loss",
-                cte.c.lr == "1e-3",
-                _artifacts.c.artifact_name.in_(
-                    ["predictions_train", "predictions_val", "predictions_test"]
-                ),
-            ),
-            and_(_artifacts.c.artifact_name == "dataset", _tags.c.tag == "german"),
-        )
-    )
+    .where(or_(*outer_conds))
 )
+print(str(stmt))
 with _engine.connect() as conn:
     for table in [_artifacts, _hparams, _tags]:
         conn.execute(CreateTable(table, if_not_exists=True))

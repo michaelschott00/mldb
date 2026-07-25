@@ -23,9 +23,14 @@ X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_
 model = xgb.XGBClassifier(eval_metric="logloss")
 model.fit(X_train, y_train)
 
-df_with_predictions = df.copy()
-df_with_predictions["predictions"] = model.predict(X)
+predictions = pd.DataFrame(
+    {
+        "uuid": df["uuid"],
+        "y_true": y,
+        "predictions": model.predict(X),
+    }
+)
 
-# Store the original dataframe with predictions for later analysis
+# Store only the uuid, true label and prediction; join on uuid to recover the rest of the dataset
 run_id = store.create_run(tags=["example_run_1", "german", "model"])
-store.store(run_id, {"predictions": df_with_predictions})
+store.store(run_id, {"predictions": predictions})
