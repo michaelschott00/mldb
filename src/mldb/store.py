@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import os
-import shutil
 import uuid
 from collections.abc import Generator
 from contextlib import contextmanager
@@ -103,7 +102,13 @@ class BlobStore:
 
     def delete(self, checksum: str) -> None:
         """Delete the blob file identified by the given checksum."""
-        shutil.rmtree(self._uri(checksum, resolve_ext=True))
+        p = Path(self._uri(checksum, resolve_ext=True))
+        if p.is_dir():
+            import shutil
+
+            shutil.rmtree(p)
+        else:
+            p.unlink()
 
     def _uri(self, checksum: str, resolve_ext: bool = False) -> str:
         """Compute the bucketed on-disk path for a checksum, optionally matching any file extension."""
