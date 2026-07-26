@@ -2,3 +2,4 @@ xgboost
 mldb
 pandas
 requests
+seaborn

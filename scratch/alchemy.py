@@ -1,7 +1,5 @@
 # SQLAlchemy
 
-from dataclasses import dataclass
-
 import pandas as pd
 from sqlalchemy import (
     Column,
@@ -18,6 +16,25 @@ from sqlalchemy.orm import aliased
 from sqlalchemy.schema import CreateTable
 
 # Example data
+
+runs_df = pd.DataFrame(
+    {
+        "run_id": [
+            "run_1",
+            "run_2",
+            "run_3",
+            "run_4",
+            "run_5",
+        ],
+        "run_name": [
+            "flunky flipper",
+            "floppy flupper",
+            "flippy flapper",
+            "babbl bragger",
+            "snipper snapper",
+        ],
+    },
+)
 
 tag_df = pd.DataFrame(
     {
@@ -100,6 +117,7 @@ _engine: Engine = create_engine(f"sqlite:///:memory:")
 tag_df.to_sql("tags", _engine, if_exists="replace")
 artifact_df.to_sql("artifacts", _engine, if_exists="replace")
 hparam_df.to_sql("hparams", _engine, if_exists="replace")
+runs_df.to_sql("runs", _engine, if_exists="replace")
 
 _meta = MetaData()
 _artifacts = Table(
@@ -122,74 +140,51 @@ _tags = Table(
     Column("run_id", String, primary_key=True),
     Column("tag", String, primary_key=True),
 )
+_runs = Table(
+    "runs",
+    _meta,
+    Column("run_id", String, primary_key=True),
+    Column("run_name", String, primary_key=False),
+)
 
 # Spec
 
 
-@dataclass
-class query:
-    names: list[str]
-    hparams: dict[str, str] | None = None
-    collections: list[str] | None = None
-
-
-specs = (
-    query(
-        names=["predictions_train", "predictions_val", "predictions_test"],
-        hparams={"eval_logs": "log_loss", "lr": "1e-3"},
-        collections=["xgboost_baseline", "xgboost_best"],
-    ),
-    query(names=["dataset"], collections=["german"]),
-)
+# names=["predictions_train", "predictions_val", "predictions_test"],
+hparam_spec = {"eval_logs": ["log_loss"], "lr": ["1e-3"]}
+# collections=["xgboost_baseline", "xgboost_best"],
 
 # SQL Query
 
-hparams = []
-for entry in specs:
-    if entry.hparams is not None:
-        hparams.extend(list(entry.hparams.keys()))
-
-hs = [aliased(_hparams) for _ in range(len(hparams))]
-cte = select(hs[0].c.run_id, *[h.c.value.label(n) for h, n in zip(hs, hparams)])
-for h, hparam in zip(hs[1:], hparams[1:]):
-    cte = cte.join_from(
-        hs[0],
-        h,
+hparam_names = list(hparam_spec.keys())
+hparam_tables = [aliased(_hparams) for _ in range(len(hparam_names))]
+hparams_stmt = select(
+    hparam_tables[0].c.run_id,
+    *[t.c.value.label(n) for t, n in zip(hparam_tables, hparam_names)],
+)
+for table, name in zip(hparam_tables[1:], hparam_names[1:]):
+    hparams_stmt = hparams_stmt.join_from(
+        hparam_tables[0],
+        table,
         and_(
-            hs[0].c.run_id == h.c.run_id,
-            hs[0].c.hparam == hparams[0],
-            h.c.hparam == hparam,
+            hparam_tables[0].c.run_id == table.c.run_id,
+            hparam_tables[0].c.hparam == hparam_names[0],
+            table.c.hparam == name,
         ),
     )
-cte = cte.cte()
+cte = hparams_stmt.cte()
 
-outer_conds = []
-for entry in specs:
-    inner_conds = []
-    inner_conds.append(_artifacts.c.artifact_name.in_(entry.names))
-    if entry.collections is not None:
-        inner_conds.append(_tags.c.tag.in_(entry.collections))
-    if entry.hparams is not None:
-        for name, value in entry.hparams.items():
-            inner_conds.append(getattr(cte.c, name) == value)
-    outer_conds.append(and_(*inner_conds))
+conds = []
+for name, values in hparam_spec.items():
+    conds.append(getattr(cte.c, name).in_(values))
 
-stmt = (
-    select(
-        _artifacts.c.run_id,
-        _artifacts.c.artifact_name,
-        _tags.c.tag,
-        cte,
-    )
-    .join(_tags, _tags.c.run_id == _artifacts.c.run_id)
-    .outerjoin(cte, _tags.c.run_id == cte.c.run_id)
-    .where(or_(*outer_conds))
-)
+raw_stmt = select(_runs).join(cte, cte.c.run_id == _runs.c.run_id)
+stmt = raw_stmt.where(and_(*conds))
 
 # Print result
 
 with _engine.connect() as conn:
-    for table in [_artifacts, _hparams, _tags]:
+    for table in [_artifacts, _hparams, _tags, _runs]:
         conn.execute(CreateTable(table, if_not_exists=True))
     conn.commit()
     res = conn.execute(stmt).all()

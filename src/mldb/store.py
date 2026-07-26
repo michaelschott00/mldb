@@ -12,16 +12,20 @@ from typing import Any, Self
 from zoneinfo import ZoneInfo
 
 from sqlalchemy import (
+    CTE,
     Column,
     MetaData,
     String,
     Table,
+    and_,
     create_engine,
     delete,
     insert,
+    or_,
     select,
 )
 from sqlalchemy.engine import Engine
+from sqlalchemy.orm import aliased
 from sqlalchemy.schema import CreateTable
 
 from mldb.utils import generate_name
@@ -36,6 +40,7 @@ class RunInfo:
     run_name: str
     run_timestamp: str
     tags: list[str] = field(default_factory=list)
+    hparams: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -125,7 +130,6 @@ class RunStore:
     ) -> None:
         """Initialize the blob store and create the SQLite index tables if they don't exist."""
         self._blob_store = BlobStore(root_dir, hash_depth, hash_granularity)
-
         db_path = Path(root_dir) / "index.db"
         self._engine: Engine = create_engine(f"sqlite:///{db_path}")
         _meta = MetaData()
@@ -149,18 +153,26 @@ class RunStore:
             Column("run_id", String, primary_key=True),
             Column("tag", String, primary_key=True),
         )
+        self._hparams = Table(
+            "hparams",
+            _meta,
+            Column("run_id", String, primary_key=True),
+            Column("name", String, primary_key=True),
+            Column("type", String, primary_key=False),
+            Column("value", String, primary_key=False),
+        )
         with self._engine.connect() as conn:
-            for table in [self._artifacts, self._runs, self._tags]:
+            for table in [self._artifacts, self._runs, self._tags, self._hparams]:
                 conn.execute(CreateTable(table, if_not_exists=True))
             conn.commit()
-
-    def close(self) -> None:
-        """Dispose of the underlying database engine and its connections."""
-        self._engine.dispose()
 
     def __del__(self) -> None:
         """Ensure the database engine is disposed when the store is garbage collected."""
         self.close()
+
+    def close(self) -> None:
+        """Dispose of the underlying database engine and its connections."""
+        self._engine.dispose()
 
     @classmethod
     def from_env(cls) -> Self:
@@ -168,7 +180,9 @@ class RunStore:
         root_dir = _require_env("DATA_ROOT")
         return cls(root_dir=root_dir)
 
-    def create_run(self, tags: list[str] | None = None) -> str:
+    def create_run(
+        self, hparams: dict[str, Any] | None = None, tags: list[str] | None = None
+    ) -> str:
         """Create a new run with a generated ID and name, recording its timestamp and optional tags."""
         name = generate_name()
         timezone = ZoneInfo("Europe/Berlin")
@@ -183,41 +197,62 @@ class RunStore:
             conn.commit()
         if tags is not None:
             self.add_tags(run_id, tags)
+        if hparams is not None:
+            self.add_hparams(run_id, hparams)
         return run_id
 
     def list_runs(
         self,
-        hparams: dict[str, str] | None = None,
+        hparams: dict[str, list[Any]] | None = None,
         tags: list[str] | None = None,
     ) -> list[RunInfo]:
         """List runs matching the given tag filters, including each run's tags."""
-        if hparams is not None:
-            raise NotImplemented("hparams parameter not yet implemented")
         # Find run_ids matching the tag query
+        stmt = select(self._runs)
         if tags is not None and len(tags) > 0:
             stmt = (
-                select(self._runs)
-                .distinct()
+                stmt.distinct()
                 .join(self._tags, self._runs.c.run_id == self._tags.c.run_id)
                 .where(self._tags.c.tag.in_(tags))
             )
-        else:
-            stmt = select(self._runs)
+        if hparams is not None and len(hparams) > 0:
+            hparams_cte = self._get_hparams_cte(hparams)
+            conds = [
+                getattr(hparams_cte.c, name).in_([str(v) for v in values])
+                for name, values in hparams.items()
+            ]
+            stmt = stmt.join(
+                hparams_cte,
+                self._runs.c.run_id == hparams_cte.c.run_id,
+            ).where(and_(*conds))
+            # TODO: hparam query
         with self._engine.connect() as conn:
             run_rows = conn.execute(stmt).all()
         if not run_rows:
             return []
         run_ids = [r.run_id for r in run_rows]
 
-        # Find tags assigned to the matched runs to display them to the user and return result
+        # Find tags and hparams assigned to the matched runs to display them to the user and return result
         tags_stmt = select(self._tags).where(self._tags.c.run_id.in_(run_ids))
+        hparams_stmt = select(self._hparams).where(self._hparams.c.run_id.in_(run_ids))
         with self._engine.connect() as conn:
             tag_rows = conn.execute(tags_stmt).all()
+            hparam_rows = conn.execute(hparams_stmt).all()
         tags_by_run: dict[str, list[str]] = {r.run_id: [] for r in run_rows}
+        hparams_by_run: dict[str, list[str]] = {r.run_id: [] for r in run_rows}
         for row in tag_rows:
             tags_by_run[row.run_id].append(row.tag)
+        for row in hparam_rows:
+            hparams_by_run[row.run_id].append(f"{row.name}={row.value}")
+
         return [
-            RunInfo(r.run_id, r.run_name, r.run_timestamp, tags_by_run[r.run_id])
+            RunInfo(
+                r.run_id,
+                r.run_name,
+                r.run_timestamp,
+                tags_by_run[r.run_id],
+                hparams_by_run[r.run_id],
+            )
             for r in run_rows
         ]
 
@@ -230,6 +265,23 @@ class RunStore:
             )
             conn.commit()
 
+    def add_hparams(self, run_id: str, hparams: dict[str, Any]) -> None:
+        """Attach the given hyperparameter settings to a run."""
+        with self._engine.connect() as conn:
+            conn.execute(
+                insert(self._hparams),
+                [
+                    {
+                        "run_id": run_id,
+                        "name": k,
+                        "type": v.__class__.__name__,
+                        "value": str(v),
+                    }
+                    for k, v in hparams.items()
+                ],
+            )
+            conn.commit()
+
     def remove_tags(self, run_id: str, tags: list[str]) -> None:
         """Detach the given tags from a run."""
         with self._engine.connect() as conn:
@@ -237,6 +289,17 @@ class RunStore:
                 delete(self._tags).where(
                     self._tags.c.run_id == run_id,
                     self._tags.c.tag.in_(tags),
+                )
+            )
+            conn.commit()
+
+    def remove_hparams(self, run_id: str, hparams: list[str]) -> None:
+        """Detach the given hyperparameters from a run."""
+        with self._engine.connect() as conn:
+            conn.execute(
+                delete(self._hparams).where(
+                    self._tags.c.run_id == run_id,
+                    self._tags.c.name.in_(hparams),
                 )
             )
             conn.commit()
@@ -305,21 +368,29 @@ class RunStore:
     def list_artifacts_by_query(
         self,
         names: list[str] | None = None,
-        hparams: dict[str, str] | None = None,
+        hparams: dict[str, list[Any]] | None = None,
         tags: list[str] | None = None,
     ) -> list[ArtifactInfo]:
         """Fetch artifact rows across runs matching the tag filters, optionally restricted to the given artifact name(s). If artifact_name is None, all artifact names are matched."""
-        if hparams is not None:
-            raise NotImplemented("hparams parameter not yet implemented")
         if names is None and hparams is None and tags is None:
             raise ValueError("Must specify at least one of names, hparams or tags")
         stmt = select(self._artifacts).distinct()
-        if names is not None:
+        if names is not None and len(names) > 0:
             stmt = stmt.where(self._artifacts.c.artifact_name.in_(names))
-        if tags is not None:
+        if tags is not None and len(tags) > 0:
             stmt = stmt.join(
                 self._tags, self._tags.c.run_id == self._artifacts.c.run_id
             ).where(self._tags.c.tag.in_(tags))
+        if hparams is not None and len(hparams) > 0:
+            hparams_cte = self._get_hparams_cte(hparams)
+            conds = [
+                getattr(hparams_cte.c, name).in_([str(v) for v in values])
+                for name, values in hparams.items()
+            ]
+            stmt = stmt.join(
+                hparams_cte,
+                self._artifacts.c.run_id == hparams_cte.c.run_id,
+            ).where(and_(*conds))
         with self._engine.connect() as conn:
             rows = conn.execute(stmt).all()
         return [
@@ -329,12 +400,10 @@ class RunStore:
     def load_artifacts_by_query(
         self,
         names: list[str] | None = None,
-        hparams: list[str] | None = None,
+        hparams: dict[str, list[Any]] | None = None,
         tags: list[str] | None = None,
     ) -> list[StoredArtifact]:
         """Load blobs of an artifact across all runs matching the given tag filters."""
-        if hparams is not None:
-            raise NotImplemented("hparams parameter not yet implemented")
         results = list()
         for row in self.list_artifacts_by_query(names, hparams, tags):
             assert row.run_id not in results, results
@@ -350,12 +419,10 @@ class RunStore:
     def load_artifact_by_query(
         self,
         name: str,
-        hparams: list[str] | None = None,
+        hparams: dict[str, list[Any]] | None = None,
         tags: list[str] | None = None,
     ) -> Any:
         """Load the single blob of an artifact matching the given tag filters, raising if there isn't exactly one match."""
-        if hparams is not None:
-            raise NotImplemented("hparams parameter not yet implemented")
         results = self.load_artifacts_by_query([name], hparams, tags)
         if len(results) == 0:
             raise ValueError(
@@ -371,6 +438,27 @@ class RunStore:
     def get_db(self) -> ResultsDatabase:
         return ResultsDatabase(self)
 
+    def _get_hparams_cte(self, hparams: dict[str, list[str]]) -> CTE:
+        """Flatten hparam EAV table using JOINs and return resulting table as CTE"""
+        hparam_names = list(hparams.keys())
+        hparam_tables = [aliased(self._hparams) for _ in range(len(hparam_names))]
+        cte = select(
+            hparam_tables[0].c.run_id,
+            *[t.c.value.label(n) for t, n in zip(hparam_tables, hparam_names)],
+        )
+        for table, name in zip(hparam_tables[1:], hparam_names[1:]):
+            cte = cte.join_from(
+                hparam_tables[0],
+                table,
+                and_(
+                    hparam_tables[0].c.run_id == table.c.run_id,
+                    hparam_tables[0].c.name == hparam_names[0],
+                    table.c.name == name,
+                ),
+            )
+        cte = cte.cte()
+        return cte
+
 
 class ResultsDatabase:
     def __init__(self, store: RunStore) -> None:
@@ -380,7 +468,7 @@ class ResultsDatabase:
     def attach(
         self,
         names: list[str] | None,
-        hparams: dict[str, str] | None = None,
+        hparams: dict[str, list[Any]] | None = None,
         tags: list[str] | None = None,
     ) -> None:
         for artifact in self._store.list_artifacts_by_query(names, hparams, tags):
@@ -401,7 +489,17 @@ class ResultsDatabase:
                 if not uri.endswith(".csv"):
                     continue
                 # TODO: Dangerous string replacement
-                con.sql(f"create table {row.artifact_name} as from '{uri}'")
+                try:
+                    con.sql(f"CREATE TABLE {row.artifact_name} AS FROM '{uri}'")
+                except duckdb.CatalogException:
+                    try:
+                        con.sql(
+                            f"INSERT INTO {row.artifact_name} BY NAME SELECT * FROM '{uri}'"
+                        )
+                    except duckdb.BinderException:
+                        raise ValueError(
+                            f"Matches for artifact {row.artifact_name} have differing schemas."
+                        )
             yield con
         finally:
             con.close()
