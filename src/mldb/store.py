@@ -438,6 +438,20 @@ class RunStore:
     def get_db(self) -> ResultsDatabase:
         return ResultsDatabase(self)
 
+    def get_tags(self, run_ids: list[str]) -> list[dict[str, str]]:
+        """Return raw (run_id, tag) rows restricted to the given run_ids."""
+        stmt = select(self._tags).where(self._tags.c.run_id.in_(run_ids))
+        with self._engine.connect() as conn:
+            rows = conn.execute(stmt).all()
+        return [dict(r._mapping) for r in rows]
+
+    def get_hparams(self, run_ids: list[str]) -> list[dict[str, str]]:
+        """Return raw (run_id, name, type, value) hparam rows restricted to the given run_ids."""
+        stmt = select(self._hparams).where(self._hparams.c.run_id.in_(run_ids))
+        with self._engine.connect() as conn:
+            rows = conn.execute(stmt).all()
+        return [dict(r._mapping) for r in rows]
+
     def _get_hparams_cte(self, hparams: dict[str, list[str]]) -> CTE:
         """Flatten hparam EAV table using JOINs and return resulting table as CTE"""
         hparam_names = list(hparams.keys())
@@ -477,11 +491,12 @@ class ResultsDatabase:
 
     @contextmanager
     def connect(self) -> Generator[Any]:
-        """Yield a DuckDB connection with tables created from all CSV artifacts matching the given tag filters."""
+        """Yield a DuckDB connection with tables created from all CSV artifacts matching the given tag filters, augmented with a column per tag and hparam."""
         import duckdb
 
         con = duckdb.connect()
         try:
+            artifact_names: set[str] = set()
             for row in self._tables:
                 uri = self._store._blob_store.uri(
                     row.artifact_checksum, resolve_ext=True
@@ -490,16 +505,82 @@ class ResultsDatabase:
                     continue
                 # TODO: Dangerous string replacement
                 try:
-                    con.sql(f"CREATE TABLE {row.artifact_name} AS FROM '{uri}'")
+                    con.sql(
+                        f"CREATE TABLE {row.artifact_name} AS "
+                        f"SELECT *, '{row.run_id}' AS run_id FROM '{uri}'"
+                    )
                 except duckdb.CatalogException:
                     try:
                         con.sql(
-                            f"INSERT INTO {row.artifact_name} BY NAME SELECT * FROM '{uri}'"
+                            f"INSERT INTO {row.artifact_name} BY NAME "
+                            f"SELECT *, '{row.run_id}' AS run_id FROM '{uri}'"
                         )
                     except duckdb.BinderException:
                         raise ValueError(
                             f"Matches for artifact {row.artifact_name} have differing schemas."
                         )
+                artifact_names.add(row.artifact_name)
+
+            run_ids = sorted({row.run_id for row in self._tables})
+            if run_ids and artifact_names:
+                self._attach_metadata(con, run_ids, artifact_names)
+
             yield con
         finally:
             con.close()
+
+    def _attach_metadata(
+        self, con: Any, run_ids: list[str], artifact_names: set[str]
+    ) -> None:
+        """Pivot tags/hparams (filtered to run_ids) into one row per run_id and left-join it onto every artifact table."""
+        tag_rows = self._store.get_tags(run_ids)
+        hparam_rows = self._store.get_hparams(run_ids)
+
+        metadata_tables: list[str] = []
+
+        if tag_rows:
+            con.sql("CREATE TEMP TABLE _tags_raw (run_id VARCHAR, tag VARCHAR)")
+            con.executemany(
+                "INSERT INTO _tags_raw VALUES (?, ?)",
+                [(r["run_id"], r["tag"]) for r in tag_rows],
+            )
+            # One row per run_id, one column per tag; value is the tag's row count
+            # for that run (nonzero == tag present, since tags are unique per run).
+            con.sql(
+                "CREATE TEMP TABLE _tags_pivot AS "
+                "PIVOT _tags_raw ON tag USING count(tag) GROUP BY run_id"
+            )
+            metadata_tables.append("_tags_pivot")
+
+        if hparam_rows:
+            con.sql(
+                "CREATE TEMP TABLE _hparams_raw (run_id VARCHAR, name VARCHAR, value VARCHAR)"
+            )
+            con.executemany(
+                "INSERT INTO _hparams_raw VALUES (?, ?, ?)",
+                [(r["run_id"], r["name"], r["value"]) for r in hparam_rows],
+            )
+            con.sql(
+                "CREATE TEMP TABLE _hparams_pivot AS "
+                "PIVOT _hparams_raw ON name USING first(value) GROUP BY run_id"
+            )
+            metadata_tables.append("_hparams_pivot")
+
+        if not metadata_tables:
+            return
+
+        if len(metadata_tables) == 2:
+            con.sql(
+                "CREATE TEMP TABLE _metadata AS "
+                "SELECT * FROM _tags_pivot FULL OUTER JOIN _hparams_pivot USING (run_id)"
+            )
+        else:
+            con.sql(
+                f"CREATE TEMP TABLE _metadata AS SELECT * FROM {metadata_tables[0]}"
+            )
+
+        for name in artifact_names:
+            con.sql(
+                f"CREATE OR REPLACE TABLE {name} AS "
+                f"SELECT * FROM {name} LEFT JOIN _metadata USING (run_id)"
+            )

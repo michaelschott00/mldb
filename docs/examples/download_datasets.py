@@ -86,7 +86,7 @@ def download_german() -> pd.DataFrame:
 
 
 def main() -> None:
-    store = RunStore.from_env()
+    store = RunStore("./data")
     try:
         run_id = store.create_run(tags=["dataset"])
         store.store(

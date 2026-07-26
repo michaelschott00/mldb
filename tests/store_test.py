@@ -426,9 +426,16 @@ class ExperimentStoreTests(unittest.TestCase):
         db.attach(names=["measurements"], tags=["my_tuning_run"])
         with db.connect() as con:
             df_rec = con.sql(
-                "select * exclude m.img_id from attribute_names n join measurements m on n.img_id=m.img_id"
+                "select n.img_id, n.attribute_id, n.is_present, m.measurement "
+                "from attribute_names n join measurements m on n.img_id=m.img_id"
             ).df()
+            attribute_names_cols = set(con.sql("select * from attribute_names").columns)
+            measurements_cols = set(con.sql("select * from measurements").columns)
         pd.testing.assert_frame_equal(df_rec, test_data.df)
+
+        # Tags of each attached run should be joined in as columns on every table
+        assert {"run_id", "dataset_1", "workflow_demo"}.issubset(attribute_names_cols)
+        assert {"run_id", "my_tuning_run", "workflow_demo"}.issubset(measurements_cols)
 
 
 if __name__ == "__main__":

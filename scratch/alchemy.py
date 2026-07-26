@@ -147,48 +147,63 @@ _runs = Table(
     Column("run_name", String, primary_key=False),
 )
 
-# Spec
-
-
-# names=["predictions_train", "predictions_val", "predictions_test"],
-hparam_spec = {"eval_logs": ["log_loss"], "lr": ["1e-3"]}
-# collections=["xgboost_baseline", "xgboost_best"],
-
-# SQL Query
-
-hparam_names = list(hparam_spec.keys())
-hparam_tables = [aliased(_hparams) for _ in range(len(hparam_names))]
-hparams_stmt = select(
-    hparam_tables[0].c.run_id,
-    *[t.c.value.label(n) for t, n in zip(hparam_tables, hparam_names)],
-)
-for table, name in zip(hparam_tables[1:], hparam_names[1:]):
-    hparams_stmt = hparams_stmt.join_from(
-        hparam_tables[0],
-        table,
-        and_(
-            hparam_tables[0].c.run_id == table.c.run_id,
-            hparam_tables[0].c.hparam == hparam_names[0],
-            table.c.hparam == name,
-        ),
-    )
-cte = hparams_stmt.cte()
-
-conds = []
-for name, values in hparam_spec.items():
-    conds.append(getattr(cte.c, name).in_(values))
-
-raw_stmt = select(_runs).join(cte, cte.c.run_id == _runs.c.run_id)
-stmt = raw_stmt.where(and_(*conds))
-
-# Print result
-
 with _engine.connect() as conn:
     for table in [_artifacts, _hparams, _tags, _runs]:
         conn.execute(CreateTable(table, if_not_exists=True))
     conn.commit()
-    res = conn.execute(stmt).all()
-print(pd.DataFrame(res))
+
+# Experiments
+
+
+def flatten_hparams():
+    # names=["predictions_train", "predictions_val", "predictions_test"],
+    hparam_spec = {"eval_logs": ["log_loss"], "lr": ["1e-3"]}
+    # collections=["xgboost_baseline", "xgboost_best"],
+
+    # SQL Query
+
+    hparam_names = list(hparam_spec.keys())
+    hparam_tables = [aliased(_hparams) for _ in range(len(hparam_names))]
+    hparams_stmt = select(
+        hparam_tables[0].c.run_id,
+        *[t.c.value.label(n) for t, n in zip(hparam_tables, hparam_names)],
+    )
+    for table, name in zip(hparam_tables[1:], hparam_names[1:]):
+        hparams_stmt = hparams_stmt.join_from(
+            hparam_tables[0],
+            table,
+            and_(
+                hparam_tables[0].c.run_id == table.c.run_id,
+                hparam_tables[0].c.hparam == hparam_names[0],
+                table.c.hparam == name,
+            ),
+        )
+    cte = hparams_stmt.cte()
+
+    conds = []
+    for name, values in hparam_spec.items():
+        conds.append(getattr(cte.c, name).in_(values))
+
+    raw_stmt = select(_runs).join(cte, cte.c.run_id == _runs.c.run_id)
+    stmt = raw_stmt.where(and_(*conds))
+
+    # Print result
+    with _engine.connect() as conn:
+        res = conn.execute(stmt).all()
+    print(pd.DataFrame(res))
+
+
+def flatten_tags():
+    run_ids = ["run_1", "run_2"]
+    stmt = select(_tags.c.tag).distinct().where(_tags.c.run_id.in_(run_ids))
+    with _engine.connect() as conn:
+        all_tags = [row[0] for row in conn.execute(stmt).all()]
+    tags_tables = [aliased(_tags) for _ in range(len(all_tags))]
+    for table, tag in zip(tags_tables, all_tags):
+        pass
+
+
+flatten_tags()
 
 # Cleanup
 
