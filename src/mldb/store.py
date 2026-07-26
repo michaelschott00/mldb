@@ -14,6 +14,7 @@ from zoneinfo import ZoneInfo
 from sqlalchemy import (
     CTE,
     Column,
+    ForeignKey,
     MetaData,
     String,
     Table,
@@ -136,7 +137,7 @@ class RunStore:
         self._artifacts = Table(
             "artifacts",
             _meta,
-            Column("run_id", String, primary_key=True),
+            Column("run_id", String, ForeignKey("runs.run_id"), primary_key=True),
             Column("artifact_name", String, primary_key=True),
             Column("artifact_checksum", String, nullable=False),
         )
@@ -150,16 +151,16 @@ class RunStore:
         self._tags = Table(
             "tags",
             _meta,
-            Column("run_id", String, primary_key=True),
+            Column("run_id", String, ForeignKey("runs.run_id"), primary_key=True),
             Column("tag", String, primary_key=True),
         )
         self._hparams = Table(
             "hparams",
             _meta,
-            Column("run_id", String, primary_key=True),
+            Column("run_id", String, ForeignKey("runs.run_id"), primary_key=True),
             Column("name", String, primary_key=True),
-            Column("type", String, primary_key=False),
-            Column("value", String, primary_key=False),
+            Column("type", String, primary_key=False, nullable=False),
+            Column("value", String, primary_key=False, nullable=False),
         )
         with self._engine.connect() as conn:
             for table in [self._artifacts, self._runs, self._tags, self._hparams]:
