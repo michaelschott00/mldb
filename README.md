@@ -17,13 +17,13 @@ db.attach(names=["german"])
 
 with db.connect() as con:
     result = con.sql("""
-        select
-            personal_status_sex as "Personal status and sex",
-            case when p.logreg then 'Logistic' else 'XGBoost' end as model,
-            avg(case when y_true != predictions then 1 else 0 end) as accuracy
-        from predictions_test p
-        join german d on p.uuid = d.uuid
-        group by p.logreg, personal_status_sex
+        SELECT
+            personal_status_sex AS "Personal status and sex",
+            CASE WHEN p.logreg THEN 'Logistic' ELSE 'XGBoost' END AS model,
+            AVG(CASE WHEN y_true == predictions THEN 1 ELSE 0 END) AS accuracy
+        FROM predictions_test p
+        JOIN german d ON p.uuid = d.uuid
+        GROUP BY p.logreg, personal_status_sex
     """).df()
 ```
 
