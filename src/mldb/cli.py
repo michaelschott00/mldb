@@ -28,6 +28,12 @@ def _print_artifacts(artifacts: list[ArtifactInfo], show_run_id: bool) -> None:
             click.echo(a.artifact_name)
 
 
+def _get_store(data: str | None) -> RunStore:
+    if data is None:
+        return RunStore.from_env()
+    return RunStore(root_dir=data)
+
+
 def _parse_tags(tags: tuple[str, ...]) -> tuple[list[str], list[str]]:
     include, exclude = [], []
     for t in tags:
@@ -47,9 +53,12 @@ def main() -> None:
 
 @main.command("list", context_settings={"ignore_unknown_options": True})
 @click.argument("tags", nargs=-1, type=click.UNPROCESSED)
-def list_runs(tags: tuple[str, ...]) -> None:
+@click.option(
+    "--data", default=None, help="Root directory to use instead of DATA_ROOT env var."
+)
+def list_runs(tags: tuple[str, ...], data: str | None) -> None:
     """List runs, optionally filtered by tags."""
-    store = RunStore.from_env()
+    store = _get_store(data)
     try:
         runs = store.list_runs(tags=list(tags))
     finally:
@@ -60,12 +69,15 @@ def list_runs(tags: tuple[str, ...]) -> None:
 @main.command("tag", context_settings={"ignore_unknown_options": True})
 @click.argument("run_id")
 @click.argument("tags", nargs=-1, type=click.UNPROCESSED)
-def tag_run(run_id: str, tags: tuple[str, ...]) -> None:
+@click.option(
+    "--data", default=None, help="Root directory to use instead of DATA_ROOT env var."
+)
+def tag_run(run_id: str, tags: tuple[str, ...], data: str | None) -> None:
     """Add (+) or remove (-) tags on a run."""
     if not tags:
         raise click.UsageError("Provide at least one tag prefixed with '+' or '-'")
     include_tags, exclude_tags = _parse_tags(tags)
-    store = RunStore.from_env()
+    store = _get_store(data)
     try:
         if include_tags:
             store.add_tags(run_id, include_tags)
@@ -77,9 +89,12 @@ def tag_run(run_id: str, tags: tuple[str, ...]) -> None:
 
 @main.command("artifacts")
 @click.argument("run_id", required=False, default=None)
-def list_artifacts(run_id: str | None) -> None:
+@click.option(
+    "--data", default=None, help="Root directory to use instead of DATA_ROOT env var."
+)
+def list_artifacts(run_id: str | None, data: str | None) -> None:
     """List stored artifacts, optionally filtered to a single run."""
-    store = RunStore.from_env()
+    store = _get_store(data)
     try:
         artifacts = store.list_artifacts_by_run(run_id)
     finally:
@@ -89,10 +104,13 @@ def list_artifacts(run_id: str | None) -> None:
 
 @main.command("delete", context_settings={"ignore_unknown_options": True})
 @click.argument("args", nargs=-1, type=click.UNPROCESSED, required=True)
-def delete_runs(args: tuple[str, ...]) -> None:
+@click.option(
+    "--data", default=None, help="Root directory to use instead of DATA_ROOT env var."
+)
+def delete_runs(args: tuple[str, ...], data: str | None) -> None:
     """Delete a run by id, or all runs matching a tag query (+include / -exclude)."""
     is_tag_query = not any(a.startswith("run_") for a in args)
-    store = RunStore.from_env()
+    store = _get_store(data)
     try:
         if is_tag_query:
             runs = store.list_runs(tags=list(args))

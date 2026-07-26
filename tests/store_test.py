@@ -129,6 +129,19 @@ class ExperimentStoreTests(unittest.TestCase):
             file = json.load(f)
         self._test_store_load("file", file, self.assertEqual)
 
+    def test_open_directory(self) -> None:
+        store, run_id = self._create_experiment()
+        run_dir = store.open_directory(run_id)
+        run_dir_path = Path(run_dir)
+        test_str = "test"
+        with open(run_dir_path / "test.txt", "w") as f:
+            f.write(test_str)
+        recovered_run_dir = store.open_directory(run_id)
+        recovered_run_dir_path = Path(recovered_run_dir)
+        with open(recovered_run_dir_path / "test.txt", "r") as f:
+            recovered_str = f.read()
+        self.assertEqual(test_str, recovered_str)
+
     def test_store_same_data(self) -> None:
         store, run_id = self._create_experiment()
         tensor = torch.Tensor([1, 2, 3])

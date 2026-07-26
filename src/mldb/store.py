@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import shutil
 import uuid
 from collections.abc import Generator
 from contextlib import contextmanager
@@ -102,7 +103,7 @@ class BlobStore:
 
     def delete(self, checksum: str) -> None:
         """Delete the blob file identified by the given checksum."""
-        os.remove(self._uri(checksum, resolve_ext=True))
+        shutil.rmtree(self._uri(checksum, resolve_ext=True))
 
     def _uri(self, checksum: str, resolve_ext: bool = False) -> str:
         """Compute the bucketed on-disk path for a checksum, optionally matching any file extension."""
@@ -343,6 +344,39 @@ class RunStore:
             conn.execute(insert(self._artifacts), artifact_rows)
             conn.commit()
 
+    def open_directory(self, run_id: str) -> str:
+        checksum = run_id[::-1]
+        run_dir_uri = self._blob_store.uri(checksum)  # prefix is always run_20...
+        run_dir_path = Path(run_dir_uri)
+
+        # Check if directory is in the database and in the filesystem
+        with self._engine.connect() as conn:
+            stored_checksums = conn.execute(
+                select(self._artifacts).where(
+                    self._artifacts.c.artifact_checksum == checksum
+                )
+            ).all()
+        if run_dir_path.exists() and len(stored_checksums) == 1:
+            return run_dir_uri
+        if run_dir_path.exists() or len(stored_checksums) != 0:
+            raise ValueError(
+                f"Blob store has been corrupted: {stored_checksums}, {run_dir_path}."
+            )
+
+        # Create directory if it doesn't exist
+        run_dir_path.mkdir()
+        with self._engine.connect() as conn:
+            conn.execute(
+                insert(self._artifacts),
+                {
+                    "run_id": run_id,
+                    "artifact_name": "directory",
+                    "artifact_checksum": checksum,
+                },
+            )
+            conn.commit()
+        return run_dir_uri
+
     def load(self, run_id: str, artifact_name: str) -> Any:
         """Load a single artifact's blob by run ID and artifact name."""
         stmt = select(self._artifacts.c.artifact_checksum).where(
@@ -365,6 +399,18 @@ class RunStore:
         return [
             ArtifactInfo(r.run_id, r.artifact_name, r.artifact_checksum) for r in rows
         ]
+
+    def list_directory_by_run(self, run_id: str) -> str:
+        stmt = select(self._artifacts).where(
+            self._artifacts.c.run_id == run_id,
+            self._artifacts.c.artifact_name == "directory",
+        )
+        with self._engine.connect() as conn:
+            rows = conn.execute(stmt).all()
+        if len(rows) == 0:
+            raise ValueError(f"No directory found for run {run_id}.")
+        assert len(rows) == 1, rows
+        return self._blob_store.uri(rows[0].artifact_checksum)
 
     def list_artifacts_by_query(
         self,
@@ -435,6 +481,14 @@ class RunStore:
                 "Change tag query or use load_artifacts_by_tags to get a list of all matches."
             )
         return results[0].artifact
+
+    def list_directories_by_query(
+        self,
+        hparams: dict[str, list[Any]] | None = None,
+        tags: list[str] | None = None,
+    ) -> list[str]:
+        results = self.list_artifacts_by_query(["directory"], hparams, tags)
+        return [self._blob_store.uri(a.artifact_checksum) for a in results]
 
     def get_db(self) -> ResultsDatabase:
         return ResultsDatabase(self)
