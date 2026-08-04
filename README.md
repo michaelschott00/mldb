@@ -12,18 +12,18 @@ Once your runs and artifacts are stored with metadata, MLDB can assemble a DuckD
 
 ```python
 db = store.get_db()
-db.attach(names=["predictions_test"], tags=["model", "german"])
-db.attach(names=["german"])
+db.attach(names=["predictions_test"], tags=["model", "german"])  # Attach all models (logreg, xgboost) for the german credit dataset
+db.attach(names=["german_dataset"])  # Attach the german credit dataset itself
 
 with db.connect() as con:
     result = con.sql("""
         SELECT
             personal_status_sex AS "Personal status and sex",
-            CASE WHEN p.logreg THEN 'Logistic' ELSE 'XGBoost' END AS model,
-            AVG(CASE WHEN y_true == predictions THEN 1 ELSE 0 END) AS accuracy
+            CASE WHEN logreg THEN 'Logistic' ELSE 'XGBoost' END AS Model,
+            AVG(CASE WHEN y_true == predictions THEN 1 ELSE 0 END) AS Accuracy
         FROM predictions_test p
-        JOIN german d ON p.uuid = d.uuid
-        GROUP BY p.logreg, personal_status_sex
+        JOIN german_dataset d ON p.uuid = d.uuid
+        GROUP BY logreg, personal_status_sex
     """).df()
 ```
 
@@ -40,12 +40,10 @@ See [`docs/examples/simple_example/example.ipynb`](docs/examples/simple_example/
 
 ## Installation
 
-**Coming soon** — MLDB isn't published to PyPI yet. In the meantime, clone the repository and install it locally:
+**Coming soon** — MLDB isn't published to PyPI yet. In the meantime, install it directly from github:
 
 ```bash
-git clone https://github.com/michaelschott00/mldb.git
-cd mldb
-pip install -e .
+pip install git+https://github.com/michaelschott00/mldb
 ```
 
 ## Getting started

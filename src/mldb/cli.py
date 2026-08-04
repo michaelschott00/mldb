@@ -102,6 +102,25 @@ def list_artifacts(run_id: str | None, data: str | None) -> None:
     _print_artifacts(artifacts, show_run_id=run_id is None)
 
 
+@main.command("hparams")
+@click.argument("run_id")
+@click.option(
+    "--data", default=None, help="Root directory to use instead of DATA_ROOT env var."
+)
+def show_hparams(run_id: str, data: str | None) -> None:
+    """Show hyperparameters stored for a run."""
+    store = _get_store(data)
+    try:
+        rows = store.get_hparams([run_id])
+    finally:
+        store.close()
+    if not rows:
+        return
+    name_w = max(len(r["name"]) for r in rows)
+    for r in rows:
+        click.echo(f"{r['name']:<{name_w}}  {r['value']}")
+
+
 @main.command("delete", context_settings={"ignore_unknown_options": True})
 @click.argument("args", nargs=-1, type=click.UNPROCESSED, required=True)
 @click.option(

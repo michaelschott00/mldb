@@ -334,7 +334,15 @@ class RunStore:
             self._blob_store.delete(checksum)
 
     def store(self, run_id: str, artifacts: dict[int | str, Any]) -> None:
-        """Store each artifact's blob and record its checksum under the given run."""
+        """Store each artifact's blob and record its checksum under the given run.
+
+        Supported artifact types:
+            - np.ndarray
+            - str (path of a file with arbitrary filetype)
+            - pd.DataFrame
+            - PIL.Image.Image
+            - torch.Tensor
+            - dict[str, Any] (torch state dict)"""
         artifact_rows = []
         for key, blob in artifacts.items():
             checksum = self._blob_store.store(blob)
