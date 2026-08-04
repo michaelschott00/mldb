@@ -110,7 +110,15 @@ def _parse_hparams(args: tuple[str, ...]) -> dict[str, list[str]]:
                 f"Hyperparameter '{a}' must be in the form name=value"
             )
         name, value = a.split("=", 1)
-        hparams.setdefault(name, []).append(value)
+        if value.startswith("[") and value.endswith("]"):
+            values = [v.strip() for v in value[1:-1].split(",")]
+            if any(v == "" for v in values):
+                raise click.UsageError(
+                    f"Hyperparameter '{a}' has an empty value in its list"
+                )
+        else:
+            values = [value]
+        hparams.setdefault(name, []).extend(values)
     return hparams
 
 
