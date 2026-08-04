@@ -3,20 +3,25 @@ import click
 from mldb.store import ArtifactInfo, RunInfo, RunStore
 
 
-def _format_hparams(r: RunInfo, hparams_filter: list[str] | None) -> str:
+def _format_hparams(
+    r: RunInfo, hparams_filter: list[str] | None, values_only: bool = False
+) -> str:
     if not r.hparams:
         return ""
-    if hparams_filter is None:
-        return ", ".join(r.hparams)
-    return ", ".join(h for h in r.hparams if h.split("=", 1)[0] in hparams_filter)
+    hparams = r.hparams
+    if hparams_filter is not None:
+        hparams = [h for h in hparams if h.split("=", 1)[0] in hparams_filter]
+    if values_only:
+        return ", ".join(h.split("=", 1)[1] for h in hparams)
+    return ", ".join(hparams)
 
 
 _RUN_COLUMNS = {
-    "rid": ("run_id", lambda r, hp: r.run_id),
-    "rn": ("run_name", lambda r, hp: r.run_name),
-    "rts": ("run_timestamp", lambda r, hp: r.run_timestamp),
-    "t": ("tags", lambda r, hp: ", ".join(r.tags) if r.tags else ""),
-    "hp": ("hparams", _format_hparams),
+    "rid": ("run_id", lambda r, hp, vo: r.run_id),
+    "rn": ("run_name", lambda r, hp, vo: r.run_name),
+    "rts": ("run_timestamp", lambda r, hp, vo: r.run_timestamp),
+    "t": ("tags", lambda r, hp, vo: ", ".join(r.tags) if r.tags else ""),
+    "hp": ("hparams", lambda r, hp, vo: _format_hparams(r, hp, vo)),
 }
 
 _DEFAULT_RUN_FORMAT = "rid,rn,rts,t,hp"
@@ -37,11 +42,15 @@ def _print_runs(
     runs: list[RunInfo],
     fmt: str = _DEFAULT_RUN_FORMAT,
     hparams_filter: list[str] | None = None,
+    hparams_values_only: bool = False,
 ) -> None:
     if not runs:
         return
     cols = _parse_run_format(fmt)
-    values = [[_RUN_COLUMNS[c][1](r, hparams_filter) for c in cols] for r in runs]
+    values = [
+        [_RUN_COLUMNS[c][1](r, hparams_filter, hparams_values_only) for c in cols]
+        for r in runs
+    ]
     widths = [max(len(row[i]) for row in values) for i in range(len(cols))]
     for row in values:
         click.echo("  ".join(v.ljust(w) for v, w in zip(row, widths)))
@@ -121,12 +130,20 @@ def _parse_hparams(args: tuple[str, ...]) -> dict[str, list[str]]:
         "(default: show all)."
     ),
 )
+@click.option(
+    "--values-only",
+    "values_only",
+    is_flag=True,
+    default=False,
+    help="Print hyperparameters as values only, without the name= prefix.",
+)
 def list_runs(
     tags: tuple[str, ...],
     data: str | None,
     hparams: tuple[str, ...],
     fmt: str,
     hparams_display: str | None,
+    values_only: bool,
 ) -> None:
     """List runs, optionally filtered by tags and hyperparameters."""
     store = _get_store(data)
@@ -139,7 +156,7 @@ def list_runs(
         if hparams_display is not None
         else None
     )
-    _print_runs(runs, fmt, hparams_filter)
+    _print_runs(runs, fmt, hparams_filter, values_only)
 
 
 @main.command("tag", context_settings={"ignore_unknown_options": True})
