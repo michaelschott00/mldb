@@ -117,16 +117,21 @@ def _parse_hparams(args: tuple[str, ...]) -> dict[str, list[str]]:
 @main.command("list", context_settings={"ignore_unknown_options": True})
 @click.argument("args", nargs=-1, type=click.UNPROCESSED)
 @click.option(
-    "--data", default=None, help="Root directory to use instead of DATA_ROOT env var."
+    "--data",
+    "-d",
+    default=None,
+    help="Root directory to use instead of DATA_ROOT env var.",
 )
 @click.option(
     "--columns",
+    "-o",
     "fmt",
     default=_DEFAULT_RUN_FORMAT,
     help=f"Comma-separated columns to display: {', '.join(_RUN_COLUMNS)}.",
 )
 @click.option(
     "--hparams",
+    "-p",
     "hparams_display",
     default=None,
     help=(
@@ -136,6 +141,7 @@ def _parse_hparams(args: tuple[str, ...]) -> dict[str, list[str]]:
 )
 @click.option(
     "--values-only",
+    "-b",
     "values_only",
     is_flag=True,
     default=False,
