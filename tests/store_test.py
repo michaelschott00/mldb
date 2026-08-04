@@ -2,6 +2,7 @@ import json
 import multiprocessing
 import os
 import shutil
+import tempfile
 import unittest
 from collections.abc import Iterator
 from dataclasses import dataclass, field, fields
@@ -345,6 +346,103 @@ class ExperimentStoreTests(unittest.TestCase):
         store.store(run_id_2, {"array": array})
         store.delete_run(run_id_1)
         np.testing.assert_equal(store.load(run_id_2, "array"), array)
+
+    # Merge tests
+
+    def _create_source_store(self, **kwargs) -> tuple[RunStore, str]:
+        source_dir = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, source_dir, ignore_errors=True)
+        return RunStore(root_dir=source_dir, **kwargs), source_dir
+
+    def test_merge_runs_tags_hparams_artifacts(self) -> None:
+        source_store, source_dir = self._create_source_store()
+        array = np.array([1, 2, 3])
+        run_id = source_store.create_run(hparams={"hparam_1": 1}, tags=["tag1", "tag2"])
+        source_store.store(run_id, {"array": array})
+        source_store.close()
+
+        dest_store = RunStore.from_env()
+        dest_store.merge(source_dir)
+
+        runs = dest_store.list_runs()
+        self.assertEqual(len(runs), 1)
+        self.assertEqual(runs[0].run_id, run_id)
+        self.assertEqual(runs[0].tags, ["tag1", "tag2"])
+        self.assertEqual(runs[0].hparams, ["hparam_1=1"])
+        np.testing.assert_equal(dest_store.load(run_id, "array"), array)
+
+    def test_merge_copies_directory_artifacts(self) -> None:
+        source_store, source_dir = self._create_source_store()
+        run_id = source_store.create_run()
+        run_dir = Path(source_store.open_directory(run_id))
+        with open(run_dir / "test.txt", "w") as f:
+            f.write("hello")
+        source_store.close()
+
+        dest_store = RunStore.from_env()
+        dest_store.merge(source_dir)
+
+        merged_dir = Path(dest_store.list_directory_by_run(run_id))
+        with open(merged_dir / "test.txt", "r") as f:
+            self.assertEqual(f.read(), "hello")
+
+    def test_merge_is_idempotent(self) -> None:
+        source_store, source_dir = self._create_source_store()
+        array = np.array([1, 2, 3])
+        run_id = source_store.create_run(tags=["tag1"])
+        source_store.store(run_id, {"array": array})
+        source_store.close()
+
+        dest_store = RunStore.from_env()
+        dest_store.merge(source_dir)
+        dest_store.merge(source_dir)
+
+        runs = dest_store.list_runs()
+        self.assertEqual(len(runs), 1)
+        self.assertEqual(runs[0].tags, ["tag1"])
+        np.testing.assert_equal(dest_store.load(run_id, "array"), array)
+
+    def test_merge_preserves_existing_dest_runs(self) -> None:
+        source_store, source_dir = self._create_source_store()
+        source_run_id = source_store.create_run()
+        source_store.close()
+
+        dest_store = RunStore.from_env()
+        dest_run_id = dest_store.create_run()
+        dest_store.merge(source_dir)
+
+        run_ids = {r.run_id for r in dest_store.list_runs()}
+        self.assertEqual(run_ids, {source_run_id, dest_run_id})
+
+    def test_merge_does_not_modify_source_directory(self) -> None:
+        source_store, source_dir = self._create_source_store()
+        array = np.array([1, 2, 3])
+        run_id = source_store.create_run()
+        source_store.store(run_id, {"array": array})
+        source_store.close()
+
+        files_before = sorted(
+            str(p.relative_to(source_dir)) for p in Path(source_dir).rglob("*")
+        )
+
+        dest_store = RunStore.from_env()
+        dest_store.merge(source_dir)
+
+        files_after = sorted(
+            str(p.relative_to(source_dir)) for p in Path(source_dir).rglob("*")
+        )
+        self.assertEqual(files_before, files_after)
+
+    def test_merge_raises_on_hash_settings_mismatch(self) -> None:
+        source_store, source_dir = self._create_source_store(
+            hash_depth=2, hash_granularity=2
+        )
+        source_store.create_run()
+        source_store.close()
+
+        dest_store = RunStore.from_env()
+        with self.assertRaises(ValueError):
+            dest_store.merge(source_dir)
 
     # Full workflow tests
 
