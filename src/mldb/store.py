@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import shutil
 import uuid
 from collections.abc import Generator
 from contextlib import contextmanager
@@ -136,10 +137,18 @@ class RunStore:
         hash_granularity: int = DEFAULT_HASH_GRANULARITY,
     ) -> None:
         """Initialize the blob store and create the SQLite index tables if they don't exist."""
+        self._hash_depth = hash_depth
+        self._hash_granularity = hash_granularity
         self._blob_store = BlobStore(root_dir, hash_depth, hash_granularity)
         db_path = Path(root_dir) / "index.db"
         self._engine: Engine = create_engine(f"sqlite:///{db_path}")
         _meta = MetaData()
+        self._store_configuration = Table(
+            "store_configuration",
+            _meta,
+            Column("hash_depth", String, primary_key=True),
+            Column("hash_granularity", String, primary_key=True),
+        )
         self._artifacts = Table(
             "artifacts",
             _meta,
@@ -169,9 +178,43 @@ class RunStore:
             Column("value", String, primary_key=False, nullable=False),
         )
         with self._engine.connect() as conn:
-            for table in [self._artifacts, self._runs, self._tags, self._hparams]:
+            for table in [
+                self._store_configuration,
+                self._artifacts,
+                self._runs,
+                self._tags,
+                self._hparams,
+            ]:
                 conn.execute(CreateTable(table, if_not_exists=True))
             conn.commit()
+        self._check_or_write_configuration(root_dir)
+
+    def _check_or_write_configuration(self, root_dir: str) -> None:
+        """Ensure the store's configuration matches the settings recorded on disk, writing them on first use."""
+        with self._engine.connect() as conn:
+            row = conn.execute(select(self._store_configuration)).first()
+            if row is None:
+                conn.execute(
+                    insert(self._store_configuration).values(
+                        hash_depth=str(self._hash_depth),
+                        hash_granularity=str(self._hash_granularity),
+                    )
+                )
+                conn.commit()
+                return
+        stored_depth, stored_granularity = (
+            int(row.hash_depth),
+            int(row.hash_granularity),
+        )
+        if (stored_depth, stored_granularity) != (
+            self._hash_depth,
+            self._hash_granularity,
+        ):
+            raise ValueError(
+                f"Store at '{root_dir}' was created with hash_depth={stored_depth}, "
+                f"hash_granularity={stored_granularity}, but was opened with "
+                f"hash_depth={self._hash_depth}, hash_granularity={self._hash_granularity}."
+            )
 
     def __del__(self) -> None:
         """Ensure the database engine is disposed when the store is garbage collected."""
@@ -332,6 +375,66 @@ class RunStore:
             conn.commit()
         for checksum in orphaned_checksums:
             self._blob_store.delete(checksum)
+
+    def merge(self, other_root_dir: str) -> None:
+        """Merge all runs, tags, hparams, artifacts and blobs from another store's directory into this one.
+
+        Raises if the other store was created with different hash_depth/hash_granularity
+        settings than this one (checked via each store's store_configuration table).
+        """
+        try:
+            other = RunStore(
+                root_dir=other_root_dir,
+                hash_depth=self._hash_depth,
+                hash_granularity=self._hash_granularity,
+            )
+        except ValueError as e:
+            raise ValueError(f"Cannot merge store at '{other_root_dir}': {e}") from e
+        try:
+            with other._engine.connect() as conn:
+                run_rows = [dict(r._mapping) for r in conn.execute(select(other._runs))]
+                tag_rows = [dict(r._mapping) for r in conn.execute(select(other._tags))]
+                hparam_rows = [
+                    dict(r._mapping) for r in conn.execute(select(other._hparams))
+                ]
+                artifact_rows = [
+                    dict(r._mapping) for r in conn.execute(select(other._artifacts))
+                ]
+
+            checksums = {r["artifact_checksum"] for r in artifact_rows}
+            for checksum in checksums:
+                self._copy_blob(other._blob_store, checksum)
+
+            with self._engine.connect() as conn:
+                if run_rows:
+                    conn.execute(insert(self._runs).prefix_with("OR IGNORE"), run_rows)
+                if tag_rows:
+                    conn.execute(insert(self._tags).prefix_with("OR IGNORE"), tag_rows)
+                if hparam_rows:
+                    conn.execute(
+                        insert(self._hparams).prefix_with("OR IGNORE"), hparam_rows
+                    )
+                if artifact_rows:
+                    conn.execute(
+                        insert(self._artifacts).prefix_with("OR IGNORE"), artifact_rows
+                    )
+                conn.commit()
+        finally:
+            other.close()
+
+    def _copy_blob(self, other_blob_store: BlobStore, checksum: str) -> None:
+        """Copy a single blob (file or directory) from another blob store into this one, skipping if already present."""
+        try:
+            src = Path(other_blob_store.uri(checksum, resolve_ext=True))
+        except ValueError:
+            return
+        dst = Path(self._blob_store.uri(checksum)).parent / src.name
+        if dst.exists():
+            return
+        if src.is_dir():
+            shutil.copytree(src, dst)
+        else:
+            shutil.copyfile(src, dst)
 
     def store(self, run_id: str, artifacts: dict[int | str, Any]) -> None:
         """Store each artifact's blob and record its checksum under the given run.

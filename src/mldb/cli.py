@@ -167,6 +167,20 @@ def show_hparams(run_id: str, data: str | None) -> None:
         click.echo(f"{r['name']:<{name_w}}  {r['value']}")
 
 
+@main.command("merge")
+@click.argument("source_dir")
+@click.option(
+    "--data", default=None, help="Root directory to use instead of DATA_ROOT env var."
+)
+def merge_store(source_dir: str, data: str | None) -> None:
+    """Merge runs, artifacts, and blobs from another store's directory into this one."""
+    store = _get_store(data)
+    try:
+        store.merge(source_dir)
+    finally:
+        store.close()
+
+
 @main.command("delete", context_settings={"ignore_unknown_options": True})
 @click.argument("args", nargs=-1, type=click.UNPROCESSED, required=True)
 @click.option(
