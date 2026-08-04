@@ -6,13 +6,13 @@ build-backend = "hatchling.build"
 name = "mldb"
 version = "0.0.1"
 dependencies = [
-  "duckdb==1.5.3",
-  "numpy==2.2.6",
-  "pandas==2.3.3",
-  "Pillow==12.2.0",
+  "duckdb>=1.5.3",
+  "numpy>=2.2.6",
+  "pandas>=2.3.3",
+  "Pillow>=12.2.0",
   "torch>=2.0",
-  "click==8.4.1",
-  "sqlalchemy==2.0.50"
+  "click>=8.4.1",
+  "sqlalchemy>=2.0.50"
 ]
 authors = [
 { name="Michael Schott", email="michael.m.develop@protonmail.com" },
