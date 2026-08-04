@@ -33,6 +33,7 @@ mldb = "mldb.cli:main"
 [project.optional-dependencies]
 dev = ["ruff", "basedpyright", "pandas-stubs"]
 docs = ["sphinx", "sphinx-rtd-theme"]
+lightning = ["lightning", "jsonargparse"]
 
 [project.urls]
 Homepage = "https://github.com/pypa/sampleproject"

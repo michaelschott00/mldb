@@ -568,6 +568,10 @@ class RunStore:
         tags: list[str] | None = None,
     ) -> list[StoredArtifact]:
         """Load blobs of an artifact across all runs matching the given tag filters."""
+        if isinstance(names, str):
+            raise ValueError(
+                "names argument takes a list of strings, even if only one name is provided."
+            )
         results = list()
         for row in self.list_artifacts_by_query(names, hparams, tags):
             assert row.run_id not in results, results
