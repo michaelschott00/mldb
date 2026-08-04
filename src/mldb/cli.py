@@ -3,17 +3,36 @@ import click
 from mldb.store import ArtifactInfo, RunInfo, RunStore
 
 
-def _print_runs(runs: list[RunInfo]) -> None:
+_RUN_COLUMNS = {
+    "rid": ("run_id", lambda r: r.run_id),
+    "rn": ("run_name", lambda r: r.run_name),
+    "rts": ("run_timestamp", lambda r: r.run_timestamp),
+    "t": ("tags", lambda r: ", ".join(r.tags) if r.tags else ""),
+    "hp": ("hparams", lambda r: ", ".join(r.hparams) if r.hparams else ""),
+}
+
+_DEFAULT_RUN_FORMAT = "rid,rn,rts,t,hp"
+
+
+def _parse_run_format(fmt: str) -> list[str]:
+    cols = [c.strip() for c in fmt.split(",")]
+    for c in cols:
+        if c not in _RUN_COLUMNS:
+            valid = ", ".join(_RUN_COLUMNS)
+            raise click.UsageError(
+                f"Unknown format column '{c}'. Valid columns: {valid}"
+            )
+    return cols
+
+
+def _print_runs(runs: list[RunInfo], fmt: str = _DEFAULT_RUN_FORMAT) -> None:
     if not runs:
         return
-    id_w = max(len(r.run_id) for r in runs)
-    name_w = max(len(r.run_name) for r in runs)
-    ts_w = max(len(r.run_timestamp) for r in runs)
-    for r in runs:
-        tags_str = ", ".join(r.tags) if r.tags else ""
-        click.echo(
-            f"{r.run_id:<{id_w}}  {r.run_name:<{name_w}}  {r.run_timestamp:<{ts_w}}  {tags_str}"
-        )
+    cols = _parse_run_format(fmt)
+    values = [[_RUN_COLUMNS[c][1](r) for c in cols] for r in runs]
+    widths = [max(len(row[i]) for row in values) for i in range(len(cols))]
+    for row in values:
+        click.echo("  ".join(v.ljust(w) for v, w in zip(row, widths)))
 
 
 def _print_artifacts(artifacts: list[ArtifactInfo], show_run_id: bool) -> None:
@@ -51,19 +70,46 @@ def main() -> None:
     pass
 
 
+def _parse_hparams(args: tuple[str, ...]) -> dict[str, list[str]]:
+    hparams: dict[str, list[str]] = {}
+    for a in args:
+        if "=" not in a:
+            raise click.UsageError(
+                f"Hyperparameter '{a}' must be in the form name=value"
+            )
+        name, value = a.split("=", 1)
+        hparams.setdefault(name, []).append(value)
+    return hparams
+
+
 @main.command("list", context_settings={"ignore_unknown_options": True})
 @click.argument("tags", nargs=-1, type=click.UNPROCESSED)
 @click.option(
     "--data", default=None, help="Root directory to use instead of DATA_ROOT env var."
 )
-def list_runs(tags: tuple[str, ...], data: str | None) -> None:
-    """List runs, optionally filtered by tags."""
+@click.option(
+    "--hparam",
+    "hparams",
+    multiple=True,
+    metavar="NAME=VALUE",
+    help="Filter by hyperparameter value; may be given multiple times.",
+)
+@click.option(
+    "--format",
+    "fmt",
+    default=_DEFAULT_RUN_FORMAT,
+    help=f"Comma-separated columns to display: {', '.join(_RUN_COLUMNS)}.",
+)
+def list_runs(
+    tags: tuple[str, ...], data: str | None, hparams: tuple[str, ...], fmt: str
+) -> None:
+    """List runs, optionally filtered by tags and hyperparameters."""
     store = _get_store(data)
     try:
-        runs = store.list_runs(tags=list(tags))
+        runs = store.list_runs(tags=list(tags), hparams=_parse_hparams(hparams))
     finally:
         store.close()
-    _print_runs(runs)
+    _print_runs(runs, fmt)
 
 
 @main.command("tag", context_settings={"ignore_unknown_options": True})
