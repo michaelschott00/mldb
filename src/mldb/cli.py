@@ -86,6 +86,17 @@ def _parse_tags(tags: tuple[str, ...]) -> tuple[list[str], list[str]]:
     return include, exclude
 
 
+def _split_tags_and_hparams(args: tuple[str, ...]) -> tuple[list[str], list[str]]:
+    tags, hparams = [], []
+    for a in args:
+        stripped = a[1:] if a and a[0] in "+-" else a
+        if "=" in stripped:
+            hparams.append(a)
+        else:
+            tags.append(a)
+    return tags, hparams
+
+
 @click.group()
 def main() -> None:
     pass
@@ -104,19 +115,12 @@ def _parse_hparams(args: tuple[str, ...]) -> dict[str, list[str]]:
 
 
 @main.command("list", context_settings={"ignore_unknown_options": True})
-@click.argument("tags", nargs=-1, type=click.UNPROCESSED)
+@click.argument("args", nargs=-1, type=click.UNPROCESSED)
 @click.option(
     "--data", default=None, help="Root directory to use instead of DATA_ROOT env var."
 )
 @click.option(
-    "--hparam",
-    "hparams",
-    multiple=True,
-    metavar="NAME=VALUE",
-    help="Filter by hyperparameter value; may be given multiple times.",
-)
-@click.option(
-    "--format",
+    "--columns",
     "fmt",
     default=_DEFAULT_RUN_FORMAT,
     help=f"Comma-separated columns to display: {', '.join(_RUN_COLUMNS)}.",
@@ -138,17 +142,17 @@ def _parse_hparams(args: tuple[str, ...]) -> dict[str, list[str]]:
     help="Print hyperparameters as values only, without the name= prefix.",
 )
 def list_runs(
-    tags: tuple[str, ...],
+    args: tuple[str, ...],
     data: str | None,
-    hparams: tuple[str, ...],
     fmt: str,
     hparams_display: str | None,
     values_only: bool,
 ) -> None:
-    """List runs, optionally filtered by tags and hyperparameters."""
+    """List runs, optionally filtered by tags and hyperparameters (name=value)."""
+    tags, hparams = _split_tags_and_hparams(args)
     store = _get_store(data)
     try:
-        runs = store.list_runs(tags=list(tags), hparams=_parse_hparams(hparams))
+        runs = store.list_runs(tags=tags, hparams=_parse_hparams(tuple(hparams)))
     finally:
         store.close()
     hparams_filter = (
