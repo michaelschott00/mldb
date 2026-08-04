@@ -276,7 +276,6 @@ class RunStore:
                 hparams_cte,
                 self._runs.c.run_id == hparams_cte.c.run_id,
             ).where(and_(*conds))
-            # TODO: hparam query
         with self._engine.connect() as conn:
             run_rows = conn.execute(stmt).all()
         if not run_rows:
@@ -636,16 +635,19 @@ class RunStore:
             hparam_tables[0].c.run_id,
             *[t.c.value.label(n) for t, n in zip(hparam_tables, hparam_names)],
         )
-        for table, name in zip(hparam_tables[1:], hparam_names[1:]):
-            cte = cte.join_from(
-                hparam_tables[0],
-                table,
-                and_(
-                    hparam_tables[0].c.run_id == table.c.run_id,
-                    hparam_tables[0].c.name == hparam_names[0],
-                    table.c.name == name,
-                ),
-            )
+        if len(hparams) == 1:
+            cte = cte.where(hparam_tables[0].c.name == hparam_names[0])
+        else:
+            for table, name in zip(hparam_tables[1:], hparam_names[1:]):
+                cte = cte.join_from(
+                    hparam_tables[0],
+                    table,
+                    and_(
+                        hparam_tables[0].c.run_id == table.c.run_id,
+                        hparam_tables[0].c.name == hparam_names[0],
+                        table.c.name == name,
+                    ),
+                )
         cte = cte.cte()
         return cte
 

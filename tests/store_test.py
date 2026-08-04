@@ -244,6 +244,14 @@ class ExperimentStoreTests(unittest.TestCase):
             sorted([test_data.run_id_2, test_data.run_id_3]), sorted(matched_run_ids)
         )
 
+    def test_query_single_hparam_ignores_other_hparam_values(self) -> None:
+        store = RunStore.from_env()
+        run_id = store.create_run(hparams={"hparam_1": "v1", "hparam_2": "v2"})
+        matched_run_ids = [
+            r.run_id for r in store.list_runs(hparams={"hparam_1": ["v2"]})
+        ]
+        self.assertEqual(matched_run_ids, [])
+
     def test_store_and_query_empty(self) -> None:
         test_data = ExperimentStoreTests.QueryTestData()
         matched_run_ids_empty = sorted(
