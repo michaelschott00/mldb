@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import shutil
 import uuid
+import warnings
 from collections.abc import Generator
 from contextlib import contextmanager
 from dataclasses import dataclass, field
@@ -665,6 +666,7 @@ class ResultsDatabase:
         """Yield a DuckDB connection with tables created from all CSV artifacts matching the given tag filters, augmented with a column per tag and hparam."""
         import duckdb
 
+        num_attached = 0
         con = duckdb.connect()
         try:
             artifact_names: set[str] = set()
@@ -674,6 +676,7 @@ class ResultsDatabase:
                 )
                 if not uri.endswith(".csv"):
                     continue
+                num_attached += 1
                 # TODO: Dangerous string replacement
                 try:
                     con.sql(
@@ -691,6 +694,8 @@ class ResultsDatabase:
                             f"Matches for artifact {row.artifact_name} have differing schemas."
                         )
                 artifact_names.add(row.artifact_name)
+            if num_attached == 0:
+                warnings.warn("No tables attached. Database will be empty.")
 
             run_ids = sorted({row.run_id for row in self._tables})
             if run_ids and artifact_names:
