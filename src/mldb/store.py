@@ -227,8 +227,8 @@ class RunStore:
 
     @classmethod
     def from_env(cls) -> Self:
-        """Construct a RunStore using the root directory from the DATA_ROOT environment variable."""
-        root_dir = _require_env("DATA_ROOT")
+        """Construct a RunStore using the root directory from the MLDB_DATA_ROOT environment variable."""
+        root_dir = _require_env("MLDB_DATA_ROOT")
         return cls(root_dir=root_dir)
 
     def create_run(

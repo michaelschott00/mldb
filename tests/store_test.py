@@ -20,7 +20,7 @@ from mldb.store import RunStore
 @dataclass
 class Environment:
     TESTS_ROOT: Path = Path("tests")
-    DATA_ROOT: Path = TESTS_ROOT / "test_data"
+    MLDB_DATA_ROOT: Path = TESTS_ROOT / "test_data"
 
     @classmethod
     def variables(cls) -> Iterator[tuple[str, Path]]:
@@ -48,7 +48,7 @@ class ExperimentStoreTests(unittest.TestCase):
     # Pytest
 
     def tearDown(self) -> None:
-        for directory in [Environment.DATA_ROOT]:
+        for directory in [Environment.MLDB_DATA_ROOT]:
             if directory.exists():
                 shutil.rmtree(directory)
 
@@ -56,14 +56,14 @@ class ExperimentStoreTests(unittest.TestCase):
 
     def test_create_store_from_env(self):
         _ = RunStore.from_env()
-        self.assertTrue(Environment.DATA_ROOT.exists())
+        self.assertTrue(Environment.MLDB_DATA_ROOT.exists())
 
     def test_create_store(self):
-        _ = RunStore(str(Environment.DATA_ROOT))
-        self.assertTrue(Environment.DATA_ROOT.exists())
+        _ = RunStore(str(Environment.MLDB_DATA_ROOT))
+        self.assertTrue(Environment.MLDB_DATA_ROOT.exists())
 
     def test_concurrent_run_creation(self) -> None:
-        root_dir = str(Environment.DATA_ROOT)
+        root_dir = str(Environment.MLDB_DATA_ROOT)
         result_queue: multiprocessing.Queue = multiprocessing.Queue()
         processes = [
             multiprocessing.Process(

@@ -128,7 +128,7 @@ def _parse_hparams(args: tuple[str, ...]) -> dict[str, list[str]]:
     "--data",
     "-d",
     default=None,
-    help="Root directory to use instead of DATA_ROOT env var.",
+    help="Root directory to use instead of MLDB_DATA_ROOT env var.",
 )
 @click.option(
     "--columns",
@@ -181,7 +181,9 @@ def list_runs(
 @click.argument("run_id")
 @click.argument("tags", nargs=-1, type=click.UNPROCESSED)
 @click.option(
-    "--data", default=None, help="Root directory to use instead of DATA_ROOT env var."
+    "--data",
+    default=None,
+    help="Root directory to use instead of MLDB_DATA_ROOT env var.",
 )
 def tag_run(run_id: str, tags: tuple[str, ...], data: str | None) -> None:
     """Add (+) or remove (-) tags on a run."""
@@ -201,7 +203,9 @@ def tag_run(run_id: str, tags: tuple[str, ...], data: str | None) -> None:
 @main.command("artifacts")
 @click.argument("run_id", required=False, default=None)
 @click.option(
-    "--data", default=None, help="Root directory to use instead of DATA_ROOT env var."
+    "--data",
+    default=None,
+    help="Root directory to use instead of MLDB_DATA_ROOT env var.",
 )
 def list_artifacts(run_id: str | None, data: str | None) -> None:
     """List stored artifacts, optionally filtered to a single run."""
@@ -216,7 +220,9 @@ def list_artifacts(run_id: str | None, data: str | None) -> None:
 @main.command("hparams")
 @click.argument("run_id")
 @click.option(
-    "--data", default=None, help="Root directory to use instead of DATA_ROOT env var."
+    "--data",
+    default=None,
+    help="Root directory to use instead of MLDB_DATA_ROOT env var.",
 )
 def show_hparams(run_id: str, data: str | None) -> None:
     """Show hyperparameters stored for a run."""
@@ -235,7 +241,9 @@ def show_hparams(run_id: str, data: str | None) -> None:
 @main.command("merge")
 @click.argument("source_dir")
 @click.option(
-    "--data", default=None, help="Root directory to use instead of DATA_ROOT env var."
+    "--data",
+    default=None,
+    help="Root directory to use instead of MLDB_DATA_ROOT env var.",
 )
 def merge_store(source_dir: str, data: str | None) -> None:
     """Merge runs, artifacts, and blobs from another store's directory into this one."""
@@ -249,7 +257,9 @@ def merge_store(source_dir: str, data: str | None) -> None:
 @main.command("delete", context_settings={"ignore_unknown_options": True})
 @click.argument("args", nargs=-1, type=click.UNPROCESSED, required=True)
 @click.option(
-    "--data", default=None, help="Root directory to use instead of DATA_ROOT env var."
+    "--data",
+    default=None,
+    help="Root directory to use instead of MLDB_DATA_ROOT env var.",
 )
 def delete_runs(args: tuple[str, ...], data: str | None) -> None:
     """Delete a run by id, or all runs matching a tag query (+include / -exclude)."""
