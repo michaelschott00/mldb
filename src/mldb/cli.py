@@ -1,3 +1,5 @@
+import shutil
+
 import click
 
 from mldb.store import ArtifactInfo, RunInfo, RunStore
@@ -38,6 +40,14 @@ def _parse_run_format(fmt: str) -> list[str]:
     return cols
 
 
+def _truncate(value: str, width: int) -> str:
+    if len(value) <= width:
+        return value
+    if width <= 3:
+        return value[:width]
+    return value[: width - 3] + "..."
+
+
 def _print_runs(
     runs: list[RunInfo],
     fmt: str = _DEFAULT_RUN_FORMAT,
@@ -52,6 +62,15 @@ def _print_runs(
         for r in runs
     ]
     widths = [max(len(row[i]) for row in values) for i in range(len(cols))]
+    terminal = shutil.get_terminal_size().columns
+    sep_len = 2 * (len(cols) - 1)
+    if sum(widths) + sep_len > terminal:
+        max_width = terminal // 5
+        for i in range(len(cols)):
+            if widths[i] > max_width:
+                widths[i] = max_width
+                for row in values:
+                    row[i] = _truncate(row[i], max_width)
     for row in values:
         click.echo("  ".join(v.ljust(w) for v, w in zip(row, widths)))
 
