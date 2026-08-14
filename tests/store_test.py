@@ -1,11 +1,9 @@
 import json
 import multiprocessing
-import os
 import shutil
 import tempfile
 import unittest
-from collections.abc import Iterator
-from dataclasses import dataclass, field, fields
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
 
@@ -15,24 +13,7 @@ import torch
 
 # from PIL import Image
 from mldb.store import RunStore
-
-
-@dataclass
-class Environment:
-    TESTS_ROOT: Path = Path("tests")
-    MLDB_DATA_ROOT: Path = TESTS_ROOT / "test_data"
-
-    @classmethod
-    def variables(cls) -> Iterator[tuple[str, Path]]:
-        return ((f.name, getattr(cls, f.name)) for f in fields(cls))
-
-    @classmethod
-    def set_variables(cls) -> None:
-        for k, v in cls.variables():
-            os.environ[k] = str(v)
-
-
-Environment.set_variables()
+from tests.test_utils import Environment
 
 
 def _concurrent_worker(
@@ -46,6 +27,9 @@ def _concurrent_worker(
 
 class ExperimentStoreTests(unittest.TestCase):
     # Pytest
+
+    def setUp(self) -> None:
+        Environment.export_variables()
 
     def tearDown(self) -> None:
         for directory in [Environment.MLDB_DATA_ROOT]:
