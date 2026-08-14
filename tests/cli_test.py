@@ -71,6 +71,23 @@ class CliTests(unittest.TestCase):
             self.store.load(source_run_id, "array"), np.array([1, 2, 3])
         )
 
+    def test_export(self) -> None:
+        keep_id = self.store.create_run(tags=["keep"], hparams={"lr": 0.01})
+        drop_id = self.store.create_run(tags=["drop"], hparams={"lr": 0.1})
+        self.store.store(keep_id, {"array": np.array([1, 2, 3])})
+        self.store.store(drop_id, {"array": np.array([4, 5, 6])})
+
+        dest_dir = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, dest_dir, ignore_errors=True)
+        result = self.runner.invoke(main, ["export", dest_dir, "keep", "lr=0.01"])
+        self.assertEqual(result.exit_code, 0)
+
+        exported = RunStore(root_dir=dest_dir)
+        runs = exported.list_runs()
+        self.assertEqual([r.run_id for r in runs], [keep_id])
+        np.testing.assert_equal(exported.load(keep_id, "array"), np.array([1, 2, 3]))
+        exported.close()
+
     def test_delete(self) -> None:
         result = self.runner.invoke(main, ["delete", self.run_id])
         self.assertEqual(result.exit_code, 0)
