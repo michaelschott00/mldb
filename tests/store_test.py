@@ -436,6 +436,58 @@ class ExperimentStoreTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             dest_store.merge(source_dir)
 
+    # Export tests
+
+    def _create_export_source(self) -> tuple[RunStore, str]:
+        store = RunStore.from_env()
+        self.run_id_keep = store.create_run(hparams={"hparam_1": 1}, tags=["keep_tag"])
+        self.run_id_drop = store.create_run(hparams={"hparam_1": 2}, tags=["drop_tag"])
+        store.store(self.run_id_keep, {"array": np.array([1, 2, 3])})
+        store.store(self.run_id_drop, {"array": np.array([4, 5, 6])})
+        return store, tempfile.mkdtemp()
+
+    def test_export_by_tag(self) -> None:
+        store, dest_dir = self._create_export_source()
+        store.export(dest_dir, tags=["keep_tag"])
+
+        exported = RunStore(root_dir=dest_dir)
+        runs = exported.list_runs()
+        self.assertEqual(len(runs), 1)
+        self.assertEqual(runs[0].run_id, self.run_id_keep)
+        self.assertEqual(runs[0].tags, ["keep_tag"])
+        self.assertEqual(runs[0].hparams, ["hparam_1=1"])
+        np.testing.assert_equal(
+            exported.load(self.run_id_keep, "array"), np.array([1, 2, 3])
+        )
+        exported.close()
+
+    def test_export_by_hparams(self) -> None:
+        store, dest_dir = self._create_export_source()
+        store.export(dest_dir, hparams={"hparam_1": [1]})
+
+        exported = RunStore(root_dir=dest_dir)
+        run_ids = [r.run_id for r in exported.list_runs()]
+        self.assertEqual(run_ids, [self.run_id_keep])
+        exported.close()
+
+    def test_export_merges_back_into_store(self) -> None:
+        store, dest_dir = self._create_export_source()
+        store.export(dest_dir, tags=["keep_tag"])
+
+        merged = RunStore(root_dir=tempfile.mkdtemp())
+        merged.merge(dest_dir)
+        runs = merged.list_runs()
+        self.assertEqual([r.run_id for r in runs], [self.run_id_keep])
+        np.testing.assert_equal(
+            merged.load(self.run_id_keep, "array"), np.array([1, 2, 3])
+        )
+        merged.close()
+
+    def test_export_no_matches_raises(self) -> None:
+        store, dest_dir = self._create_export_source()
+        with self.assertRaises(ValueError):
+            store.export(dest_dir, tags=["no_such_tag"])
+
     # Full workflow tests
 
     @dataclass

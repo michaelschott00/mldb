@@ -436,6 +436,67 @@ class RunStore:
         else:
             shutil.copyfile(src, dst)
 
+    def export(
+        self,
+        dest_dir: str,
+        tags: list[str] | None = None,
+        hparams: dict[str, list[Any]] | None = None,
+    ) -> None:
+        """Export the runs matching the given tag/hparam filters into a new store directory.
+
+        The destination directory contains only the matched runs, their tags, hparams,
+        artifacts and blobs, and can be imported into another store via merge().
+        """
+        matched_runs = self.list_runs(tags=tags, hparams=hparams)
+        run_ids = {r.run_id for r in matched_runs}
+        if not run_ids:
+            raise ValueError("No runs matched the given tags/hparams for export.")
+
+        with self._engine.connect() as conn:
+            run_rows = [
+                dict(r._mapping)
+                for r in conn.execute(select(self._runs)).all()
+                if r.run_id in run_ids
+            ]
+            tag_rows = [
+                dict(r._mapping)
+                for r in conn.execute(select(self._tags)).all()
+                if r.run_id in run_ids
+            ]
+            hparam_rows = [
+                dict(r._mapping)
+                for r in conn.execute(select(self._hparams)).all()
+                if r.run_id in run_ids
+            ]
+            artifact_rows = [
+                dict(r._mapping)
+                for r in conn.execute(select(self._artifacts)).all()
+                if r.run_id in run_ids
+            ]
+
+        dest = RunStore(
+            root_dir=dest_dir,
+            hash_depth=self._hash_depth,
+            hash_granularity=self._hash_granularity,
+        )
+        try:
+            checksums = {r["artifact_checksum"] for r in artifact_rows}
+            for checksum in checksums:
+                dest._copy_blob(self._blob_store, checksum)
+
+            with dest._engine.connect() as conn:
+                if run_rows:
+                    conn.execute(insert(dest._runs), run_rows)
+                if tag_rows:
+                    conn.execute(insert(dest._tags), tag_rows)
+                if hparam_rows:
+                    conn.execute(insert(dest._hparams), hparam_rows)
+                if artifact_rows:
+                    conn.execute(insert(dest._artifacts), artifact_rows)
+                conn.commit()
+        finally:
+            dest.close()
+
     def store(self, run_id: str, artifacts: dict[int | str, Any]) -> None:
         """Store each artifact's blob and record its checksum under the given run.
 

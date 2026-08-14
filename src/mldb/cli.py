@@ -254,6 +254,25 @@ def merge_store(source_dir: str, data: str | None) -> None:
         store.close()
 
 
+@main.command("export", context_settings={"ignore_unknown_options": True})
+@click.argument("dest_dir")
+@click.argument("args", nargs=-1, type=click.UNPROCESSED)
+@click.option(
+    "--data",
+    "-d",
+    default=None,
+    help="Root directory to use instead of MLDB_DATA_ROOT env var.",
+)
+def export_store(dest_dir: str, args: tuple[str, ...], data: str | None) -> None:
+    """Export runs matching tags and hyperparameters (name=value) into a new store directory."""
+    tags, hparams = _split_tags_and_hparams(args)
+    store = _get_store(data)
+    try:
+        store.export(dest_dir, tags=tags, hparams=_parse_hparams(tuple(hparams)))
+    finally:
+        store.close()
+
+
 @main.command("delete", context_settings={"ignore_unknown_options": True})
 @click.argument("args", nargs=-1, type=click.UNPROCESSED, required=True)
 @click.option(
