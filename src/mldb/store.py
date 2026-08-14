@@ -11,7 +11,7 @@ from datetime import datetime
 from os import environ
 from pathlib import Path
 from typing import Any, Self
-from zoneinfo import ZoneInfo
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from sqlalchemy import (
     CTE,
@@ -35,6 +35,7 @@ from mldb.utils import generate_name
 
 DEFAULT_HASH_DEPTH = 3
 DEFAULT_HASH_GRANULARITY = 1
+DEFAULT_TIMEZONE = "Europe/Berlin"
 
 
 @dataclass
@@ -136,19 +137,27 @@ class RunStore:
         root_dir: str,
         hash_depth: int = DEFAULT_HASH_DEPTH,
         hash_granularity: int = DEFAULT_HASH_GRANULARITY,
+        timezone: str | None = None,
     ) -> None:
         """Initialize the blob store and create the SQLite index tables if they don't exist."""
+        self._engine: Engine | None = None
         self._hash_depth = hash_depth
         self._hash_granularity = hash_granularity
+        self._timezone = timezone or environ.get("MLDB_TIMEZONE") or DEFAULT_TIMEZONE
+        try:
+            ZoneInfo(self._timezone)
+        except ZoneInfoNotFoundError as e:
+            raise ValueError(f"Invalid timezone: {self._timezone!r}") from e
         self._blob_store = BlobStore(root_dir, hash_depth, hash_granularity)
         db_path = Path(root_dir) / "index.db"
-        self._engine: Engine = create_engine(f"sqlite:///{db_path}")
+        self._engine = create_engine(f"sqlite:///{db_path}")
         _meta = MetaData()
         self._store_configuration = Table(
             "store_configuration",
             _meta,
             Column("hash_depth", String, primary_key=True),
             Column("hash_granularity", String, primary_key=True),
+            Column("timezone", String, nullable=False),
         )
         self._artifacts = Table(
             "artifacts",
@@ -199,6 +208,7 @@ class RunStore:
                     insert(self._store_configuration).values(
                         hash_depth=str(self._hash_depth),
                         hash_granularity=str(self._hash_granularity),
+                        timezone=self._timezone,
                     )
                 )
                 conn.commit()
@@ -216,6 +226,19 @@ class RunStore:
                 f"hash_granularity={stored_granularity}, but was opened with "
                 f"hash_depth={self._hash_depth}, hash_granularity={self._hash_granularity}."
             )
+        stored_timezone = getattr(row, "timezone", None)
+        if stored_timezone is not None and stored_timezone != self._timezone:
+            warnings.warn(
+                f"Store at '{root_dir}' was created with timezone={stored_timezone}, "
+                f"but was opened with timezone={self._timezone}. Using the stored "
+                f"timezone '{stored_timezone}'."
+            )
+            self._timezone = stored_timezone
+        elif stored_timezone is None:
+            warnings.warn(
+                f"Store at '{root_dir}' has no timezone recorded in its configuration; "
+                f"using '{self._timezone}'."
+            )
 
     def __del__(self) -> None:
         """Ensure the database engine is disposed when the store is garbage collected."""
@@ -223,7 +246,8 @@ class RunStore:
 
     def close(self) -> None:
         """Dispose of the underlying database engine and its connections."""
-        self._engine.dispose()
+        if self._engine is not None:
+            self._engine.dispose()
 
     @classmethod
     def from_env(cls) -> Self:
@@ -236,7 +260,7 @@ class RunStore:
     ) -> str:
         """Create a new run with a generated ID and name, recording its timestamp and optional tags."""
         name = generate_name()
-        timezone = ZoneInfo("Europe/Berlin")
+        timezone = ZoneInfo(self._timezone)
         timestamp = datetime.now(timezone).strftime("%Y-%m-%d %H:%M:%S")
         run_id = f"run_{timestamp.replace(' ', '-')}_{uuid.uuid4().hex[:8]}_{name}"
         with self._engine.connect() as conn:
@@ -387,6 +411,7 @@ class RunStore:
                 root_dir=other_root_dir,
                 hash_depth=self._hash_depth,
                 hash_granularity=self._hash_granularity,
+                timezone=self._timezone,
             )
         except ValueError as e:
             raise ValueError(f"Cannot merge store at '{other_root_dir}': {e}") from e

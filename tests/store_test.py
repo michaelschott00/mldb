@@ -1,11 +1,15 @@
 import json
 import multiprocessing
+import os
 import shutil
 import tempfile
 import unittest
+import warnings
 from dataclasses import dataclass, field
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable
+from zoneinfo import ZoneInfo
 
 import numpy as np
 import pandas as pd
@@ -45,6 +49,62 @@ class ExperimentStoreTests(unittest.TestCase):
     def test_create_store(self):
         _ = RunStore(str(Environment.MLDB_DATA_ROOT))
         self.assertTrue(Environment.MLDB_DATA_ROOT.exists())
+
+    # Timezone tests
+
+    def _timestamp_in_timezone(self, tz_name: str) -> tuple[str, str, str]:
+        """Create a run and return its stored timestamp plus the expected bounds."""
+        utc_before = datetime.now(ZoneInfo("UTC"))
+        store = RunStore(str(Environment.MLDB_DATA_ROOT), timezone=tz_name)
+        store.create_run()
+        stored = store.list_runs()[0].run_timestamp
+        utc_after = datetime.now(ZoneInfo("UTC"))
+        fmt = "%Y-%m-%d %H:%M:%S"
+        return (
+            utc_before.astimezone(ZoneInfo(tz_name)).strftime(fmt),
+            stored,
+            utc_after.astimezone(ZoneInfo(tz_name)).strftime(fmt),
+        )
+
+    def test_timezone_param_is_used(self) -> None:
+        tz = "Asia/Tokyo"
+        lower, stored, upper = self._timestamp_in_timezone(tz)
+        self.assertGreaterEqual(stored, lower)
+        self.assertLessEqual(stored, upper)
+
+    def test_timezone_env_fallback(self) -> None:
+        os.environ["MLDB_TIMEZONE"] = "America/New_York"
+        self.addCleanup(os.environ.pop, "MLDB_TIMEZONE", None)
+        tz = "America/New_York"
+        lower, stored, upper = self._timestamp_in_timezone(tz)
+        self.assertGreaterEqual(stored, lower)
+        self.assertLessEqual(stored, upper)
+
+    def test_timezone_default(self) -> None:
+        lower, stored, upper = self._timestamp_in_timezone("Europe/Berlin")
+        self.assertGreaterEqual(stored, lower)
+        self.assertLessEqual(stored, upper)
+
+    def test_timezone_param_takes_precedence_over_env(self) -> None:
+        os.environ["MLDB_TIMEZONE"] = "America/New_York"
+        self.addCleanup(os.environ.pop, "MLDB_TIMEZONE", None)
+        tz = "Asia/Tokyo"
+        lower, stored, upper = self._timestamp_in_timezone(tz)
+        self.assertGreaterEqual(stored, lower)
+        self.assertLessEqual(stored, upper)
+
+    def test_invalid_timezone_raises(self) -> None:
+        with self.assertRaises(ValueError):
+            RunStore(str(Environment.MLDB_DATA_ROOT), timezone="Not/AZone")
+
+    def test_reopen_adapts_to_stored_timezone(self) -> None:
+        root_dir = str(Environment.MLDB_DATA_ROOT)
+        RunStore(root_dir, timezone="Asia/Tokyo").create_run()
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            store = RunStore(root_dir, timezone="Europe/Berlin")
+        self.assertEqual(store._timezone, "Asia/Tokyo")
+        self.assertTrue(any("timezone" in str(w.message) for w in caught), caught)
 
     def test_concurrent_run_creation(self) -> None:
         root_dir = str(Environment.MLDB_DATA_ROOT)
@@ -435,6 +495,19 @@ class ExperimentStoreTests(unittest.TestCase):
         dest_store = RunStore.from_env()
         with self.assertRaises(ValueError):
             dest_store.merge(source_dir)
+
+    def test_merge_warns_on_timezone_mismatch(self) -> None:
+        source_store, source_dir = self._create_source_store(timezone="Asia/Tokyo")
+        source_store.create_run()
+        source_store.close()
+
+        dest_store = RunStore.from_env()
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            dest_store.merge(source_dir)
+        self.assertTrue(any("timezone" in str(w.message) for w in caught), caught)
+        runs = dest_store.list_runs()
+        self.assertEqual(len(runs), 1)
 
     # Full workflow tests
 
