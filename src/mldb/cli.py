@@ -53,6 +53,7 @@ def _print_runs(
     fmt: str = _DEFAULT_RUN_FORMAT,
     hparams_filter: list[str] | None = None,
     hparams_values_only: bool = False,
+    no_truncate: bool = False,
 ) -> None:
     if not runs:
         return
@@ -62,15 +63,16 @@ def _print_runs(
         for r in runs
     ]
     widths = [max(len(row[i]) for row in values) for i in range(len(cols))]
-    terminal = shutil.get_terminal_size().columns
-    sep_len = 2 * (len(cols) - 1)
-    if sum(widths) + sep_len > terminal:
-        max_width = terminal // 5
-        for i in range(len(cols)):
-            if widths[i] > max_width:
-                widths[i] = max_width
-                for row in values:
-                    row[i] = _truncate(row[i], max_width)
+    if not no_truncate:
+        terminal = shutil.get_terminal_size().columns
+        sep_len = 2 * (len(cols) - 1)
+        if sum(widths) + sep_len > terminal:
+            max_width = terminal // 5
+            for i in range(len(cols)):
+                if widths[i] > max_width:
+                    widths[i] = max_width
+                    for row in values:
+                        row[i] = _truncate(row[i], max_width)
     for row in values:
         click.echo("  ".join(v.ljust(w) for v, w in zip(row, widths)))
 
@@ -174,12 +176,20 @@ def _parse_hparams(args: tuple[str, ...]) -> dict[str, list[str]]:
     default=False,
     help="Print hyperparameters as values only, without the name= prefix.",
 )
+@click.option(
+    "--no-truncate",
+    "no_truncate",
+    is_flag=True,
+    default=False,
+    help="Disable truncation of columns that exceed the terminal width.",
+)
 def list_runs(
     args: tuple[str, ...],
     data: str | None,
     fmt: str,
     hparams_display: str | None,
     values_only: bool,
+    no_truncate: bool,
 ) -> None:
     """List runs, optionally filtered by tags and hyperparameters (name=value)."""
     tags, hparams = _split_tags_and_hparams(args)
@@ -193,7 +203,7 @@ def list_runs(
         if hparams_display is not None
         else None
     )
-    _print_runs(runs, fmt, hparams_filter, values_only)
+    _print_runs(runs, fmt, hparams_filter, values_only, no_truncate)
 
 
 @main.command("tag", context_settings={"ignore_unknown_options": True})

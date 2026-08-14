@@ -23,7 +23,7 @@ class CliTests(unittest.TestCase):
             shutil.rmtree(Environment.MLDB_DATA_ROOT)
 
     def test_list(self) -> None:
-        result = self.runner.invoke(main, ["list"])
+        result = self.runner.invoke(main, ["list", "--no-truncate"])
         self.assertEqual(result.exit_code, 0)
         self.assertIn(self.run_id, result.output)
 
