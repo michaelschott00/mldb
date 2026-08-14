@@ -312,6 +312,49 @@ class ExperimentStoreTests(unittest.TestCase):
         )
         self.assertEqual(matched_run_ids_empty, matched_run_ids_none)
 
+    def test_store_and_query_timestamp(self) -> None:
+        store = RunStore.from_env()
+        first = store.create_run()
+        third = store.create_run()
+        timestamps = {r.run_id: r.run_timestamp for r in store.list_runs()}
+        first_ts = timestamps[first]
+        third_ts = timestamps[third]
+
+        before_first = [r.run_id for r in store.list_runs(before=first_ts)]
+        self.assertNotIn(first, before_first)
+        self.assertEqual(
+            before_first,
+            [r.run_id for r in store.list_runs() if r.run_timestamp < first_ts],
+        )
+
+        after_third = [r.run_id for r in store.list_runs(after=third_ts)]
+        self.assertNotIn(third, after_third)
+        self.assertEqual(
+            after_third,
+            [r.run_id for r in store.list_runs() if r.run_timestamp > third_ts],
+        )
+
+        between = [r.run_id for r in store.list_runs(before=third_ts, after=first_ts)]
+        self.assertEqual(
+            between,
+            [
+                r.run_id
+                for r in store.list_runs()
+                if first_ts < r.run_timestamp < third_ts
+            ],
+        )
+
+    def test_query_timestamp_with_datetime(self) -> None:
+        store = RunStore.from_env()
+        run_id = store.create_run()
+        stored = store.list_runs()[0].run_timestamp
+        dt = datetime.strptime(stored, "%Y-%m-%d %H:%M:%S").replace(
+            tzinfo=ZoneInfo(store._timezone)
+        )
+        self.assertEqual([r.run_id for r in store.list_runs(after=dt)], [])
+        self.assertEqual([r.run_id for r in store.list_runs(before=dt)], [])
+        self.assertIn(run_id, [r.run_id for r in store.list_runs()])
+
     def test_list_artifacts_by_tags(self) -> None:
         test_data = ExperimentStoreTests.QueryTestData()
         results = test_data.store.list_artifacts_by_query(

@@ -276,14 +276,39 @@ class RunStore:
             self.add_hparams(run_id, hparams)
         return run_id
 
+    def _normalize_timestamp(self, ts: str | datetime) -> str:
+        """Normalize a timestamp to the string format stored in the database."""
+        if isinstance(ts, datetime):
+            if ts.tzinfo is None:
+                ts = ts.replace(tzinfo=ZoneInfo(self._timezone))
+            ts = ts.astimezone(ZoneInfo(self._timezone))
+            return ts.strftime("%Y-%m-%d %H:%M:%S")
+        return ts
+
     def list_runs(
         self,
         hparams: dict[str, list[Any]] | None = None,
         tags: list[str] | None = None,
+        before: str | datetime | None = None,
+        after: str | datetime | None = None,
     ) -> list[RunInfo]:
-        """List runs matching the given tag filters, including each run's tags."""
+        """List runs matching the given tag filters, including each run's tags.
+
+        The `before` and `after` arguments restrict the listed runs to those
+        whose timestamp is strictly before or after the given timestamp (in the
+        store's timezone). A value of None for either leaves that bound
+        unrestricted; it is allowed to set only one of the two.
+        """
         # Find run_ids matching the tag query
         stmt = select(self._runs)
+        if before is not None:
+            stmt = stmt.where(
+                self._runs.c.run_timestamp < self._normalize_timestamp(before)
+            )
+        if after is not None:
+            stmt = stmt.where(
+                self._runs.c.run_timestamp > self._normalize_timestamp(after)
+            )
         if tags is not None and len(tags) > 0:
             stmt = (
                 stmt.distinct()

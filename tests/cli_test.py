@@ -27,6 +27,43 @@ class CliTests(unittest.TestCase):
         self.assertEqual(result.exit_code, 0)
         self.assertIn(self.run_id, result.output)
 
+    def test_list_before(self) -> None:
+        second = self.store.create_run()
+        timestamps = {r.run_id: r.run_timestamp for r in self.store.list_runs()}
+        result = self.runner.invoke(
+            main, ["list", "--no-truncate", "--before", timestamps[second]]
+        )
+        self.assertEqual(result.exit_code, 0)
+        self.assertNotIn(second, result.output)
+
+    def test_list_after(self) -> None:
+        first = self.store.create_run()
+        timestamps = {r.run_id: r.run_timestamp for r in self.store.list_runs()}
+        result = self.runner.invoke(
+            main, ["list", "--no-truncate", "--after", timestamps[first]]
+        )
+        self.assertEqual(result.exit_code, 0)
+        self.assertNotIn(first, result.output)
+
+    def test_list_before_and_after(self) -> None:
+        first = self.store.create_run()
+        third = self.store.create_run()
+        timestamps = {r.run_id: r.run_timestamp for r in self.store.list_runs()}
+        result = self.runner.invoke(
+            main,
+            [
+                "list",
+                "--no-truncate",
+                "--before",
+                timestamps[third],
+                "--after",
+                timestamps[first],
+            ],
+        )
+        self.assertEqual(result.exit_code, 0)
+        self.assertNotIn(first, result.output)
+        self.assertNotIn(third, result.output)
+
     def test_tag_add(self) -> None:
         result = self.runner.invoke(main, ["tag", self.run_id, "+tag1"])
         self.assertEqual(result.exit_code, 0)

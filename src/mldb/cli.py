@@ -183,6 +183,18 @@ def _parse_hparams(args: tuple[str, ...]) -> dict[str, list[str]]:
     default=False,
     help="Disable truncation of columns that exceed the terminal width.",
 )
+@click.option(
+    "--before",
+    default=None,
+    help="Only list runs whose timestamp is strictly before this time "
+    "(format: YYYY-MM-DD HH:MM:SS).",
+)
+@click.option(
+    "--after",
+    default=None,
+    help="Only list runs whose timestamp is strictly after this time "
+    "(format: YYYY-MM-DD HH:MM:SS).",
+)
 def list_runs(
     args: tuple[str, ...],
     data: str | None,
@@ -190,12 +202,19 @@ def list_runs(
     hparams_display: str | None,
     values_only: bool,
     no_truncate: bool,
+    before: str | None,
+    after: str | None,
 ) -> None:
-    """List runs, optionally filtered by tags and hyperparameters (name=value)."""
+    """List runs, optionally filtered by tags, hyperparameters (name=value), and timestamps."""
     tags, hparams = _split_tags_and_hparams(args)
     store = _get_store(data)
     try:
-        runs = store.list_runs(tags=tags, hparams=_parse_hparams(tuple(hparams)))
+        runs = store.list_runs(
+            tags=tags,
+            hparams=_parse_hparams(tuple(hparams)),
+            before=before,
+            after=after,
+        )
     finally:
         store.close()
     hparams_filter = (
